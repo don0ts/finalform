@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<title>Measurables & Data Entry</title>
+<link rel="stylesheet" href="css/index.css"/>
+</head>
+<body>
+<div class="topbar">
+<header>
+  <h1 id="appTitle">MEASURABLES &amp; DATA ENTRY TOOL</h1>
+  <span class="sub" id="appSub">Fill in the fields, then export a CSV matching the template exactly.</span>
+  <span class="connstate" id="connState" data-state="connecting">Connecting…</span>
+  <div class="spacer"></div>
+  <button class="ghost" id="toggleHeader">Hide</button>
+  <a class="navlink" id="gotoLogger" href="logger.html">Logger</a>
+  <a class="navlink" id="gotoProfiles" href="profile_manager.html">Profiles</a>
+  <a class="navlink" id="gotoStatus" href="status.html">Status</a>
+</header>
+
+<div class="moderow" id="moderow">
+  <button class="modebtn active" id="modeMeas">MEASURABLES ENTRY</button>
+  <button class="modebtn" id="modeData">DATA ENTRY</button>
+</div>
+
+<div class="exportrow" id="exportrow">
+  <div class="menuwrap" id="exportMenu">
+    <button class="primary menutrigger" id="exportBtn">Export CSV <span class="caret">▾</span></button>
+    <div class="menupanel">
+      <button id="exportMeasBtn">Measurables CSV</button>
+      <button id="exportDataBtn">Data CSV</button>
+      <button id="exportSessionXlsBtn">Session Excel</button>
+      <button id="exportSessionPdfBtn">Session PDF</button>
+      <button id="exportPdfListBtn">PDF Player List</button>
+    </div>
+  </div>
+  <div class="menuwrap" id="loadMenu">
+    <button class="primary menutrigger" id="loadBtn">Load CSV <span class="caret">▾</span></button>
+    <div class="menupanel">
+      <button id="loadMeasBtn">Measurables CSV</button>
+      <button id="loadDataBtn">Data CSV</button>
+    </div>
+  </div>
+  <label class="check" style="font-size:12px;color:var(--muted);align-self:center"><input type="checkbox" id="excludePitchers" /><span>Exclude Pitchers?</span></label>
+</div>
+</div>
+
+<div class="wrap">
+  <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">Event date
+      <input type="date" id="eventDate" style="background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:7px 10px;font-size:13px;width:150px;color-scheme:dark" />
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">Time of day
+      <select id="eventTod" title="Sets the Time of Day for all tech captured in the Data Entry tab for this event" style="background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:7px 10px;font-size:13px;width:130px">
+        <option value="Morning">Morning</option>
+        <option value="Afternoon">Afternoon</option>
+        <option value="Evening">Evening</option>
+      </select>
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">Event name
+      <input type="text" id="eventName" placeholder="e.g. Fall Combine" style="background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:7px 10px;font-size:13px;width:170px" />
+    </label>
+    <button class="primary" id="saveEvent">Create event</button>
+  </div>
+  <div style="margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">Saved events
+      <select id="savedEvents" style="background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:7px 10px;font-size:13px;min-width:240px"></select>
+    </label>
+    <input type="file" id="csvFile" accept=".csv,text/csv" style="display:none">
+    <button class="ghost" id="editEvent" title="Edit this event's name and date (updates the database without duplicating)">Edit</button>
+    <button class="ghost" id="deleteEvent">Delete</button>
+    <button class="ghost" id="mergeEventBtn" title="Merge two or more events into one combined event">Merge</button>
+    <button class="ghost" id="saveEventDbBtn" title="Save this event to the database and stamp each player's data groups with this event's date on the Status page">Save to DB</button>
+  </div>
+  <div id="measurablesView">
+  <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <button id="addPlayerTop">+ Add player</button>
+    <button class="ghost" id="arrangePlayersBtn" title="Arrange players by position: OF, then IF, then C, then P">Arrange Players</button>
+    <span class="ocrbar" id="eventDateNote"></span>
+  </div>
+  <div class="playerbar" id="playerbar"></div>
+  <div id="devLinks" style="margin:0 0 16px"></div>
+  <div class="hint">Each player is one row in the exported CSV. Set the <b>Position</b> (e.g. IF, OF, or C &ndash; upper or lower case) and the matching Arm Strength count fills in automatically (still editable). Green AUTO fields (velocity / spin-rate / arm-strength averages) are the midpoint of the min and max you enter. The 60 yard split and 60 Yard Time average stay in sync both ways.</div>
+  <div id="form"></div>
+  </div>
+
+  <div id="dataEntryView" style="display:none">
+    <div id="deGate" class="hint" style="text-align:center;padding:34px 10px">Create or select an event above, then fill in the device data.</div>
+    <div id="deContent" style="display:none">
+      <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button id="deAddPlayer">+ Add player</button>
+      </div>
+      <div class="seg-group"><div class="lbl">Device IDs (shared metadata)</div>
+        <div class="mapids" id="mapIds"></div>
+      </div>
+      <div id="devAccordion"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+<div class="overlay" id="overlay2" style="z-index:60"><div class="modal" id="modal2" style="max-width:560px"></div></div>
+
+<script src="js/index.js"></script>
+<script type="module">
+// ==== Firestore sync layer (add / edit players -> cloud, live autocomplete cache) ====
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// >>> PASTE YOUR CONFIG: Firebase console -> Project settings -> Your apps -> SDK setup <<<
+const firebaseConfig = {
+  apiKey: "AIzaSyDzxseQexlbv0onZH2l5PHNDa5ZKFv5Kz8",
+  authDomain: "cubsentry.web.app",
+  projectId: "cubsentry",
+  storageBucket: "cubsentry.firebasestorage.app",
+  messagingSenderId: "929110932897",
+  appId: "1:929110932897:web:1d91596a2787084a085fe0"
+};
+const COLLECTION = "Players"; // Firestore collection holding player documents
+const EVENTS_COLLECTION = "Events"; // Firestore collection holding saved events
+
+// Small helper to reflect DB connection status in the header indicator.
+function setConnState(state, label){
+  var el=document.getElementById('connState'); if(!el) return;
+  el.textContent=label;
+  el.setAttribute('data-state', state);
+}
+setConnState('connecting','Connecting\u2026');
+
+try {
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const col = collection(db, COLLECTION);
+  let cache = [];
+  const listeners = [];
+  // live cache -> keeps Add-player autocomplete in sync with the database
+  onSnapshot(col, snap => {
+    cache = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+    setConnState('connected','Connected');
+    listeners.forEach(fn => { try { fn(); } catch(e){} });
+    // Live inbound refresh: push external profile edits into the loaded roster.
+    if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
+  }, err => { console.warn("Firestore listen error:", err); setConnState('offline','Disconnected'); });
+  // live cache of saved events -> feeds the main-page "Saved events" dropdown
+  const evCol = collection(db, EVENTS_COLLECTION);
+  onSnapshot(evCol, snap => {
+    const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+    setConnState('connected','Connected');
+    if(window.__applyDbEvents){ try { window.__applyDbEvents(evs); } catch(e){} }
+  }, err => console.warn("Firestore events listen error:", err));
+  window.CubSentryDB = {
+    players(){ return cache; },
+    onChange(fn){ listeners.push(fn); },
+    upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
+    remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
+    eventUpsert(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
+    eventRemove(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
+  };
+} catch(e){ console.warn("Firebase init failed (app still works offline):", e); setConnState('offline','Offline'); }
+</script>
+</body>
+</html>
