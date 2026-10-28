@@ -134,6 +134,52 @@ function playerIdFor(sess, name){
    (falling back to a stored id when the name was renamed in the DB) and stores
    the real player_id. Re-stamps existing log entries so their exported ids
    match. Nothing here runs on its own — only when the Sync IDs button is used. */
+/* ===== CSV helpers for re-stamping stored CSV player ids on Sync IDs ===== */
+// Minimal RFC4180-style parser: handles quoted fields, escaped "" quotes and
+// CR/LF. Returns an array of rows (each an array of string cells).
+function parseCsvRows(text){
+  const rows=[]; let row=[]; let field=''; let inq=false; const s=String(text||''); let i=0;
+  while(i<s.length){
+    const c=s[i];
+    if(inq){
+      if(c==='"'){ if(s[i+1]==='"'){ field+='"'; i+=2; continue; } inq=false; i++; continue; }
+      field+=c; i++; continue;
+    }
+    if(c==='"'){ inq=true; i++; continue; }
+    if(c===','){ row.push(field); field=''; i++; continue; }
+    if(c==='\r'){ i++; continue; }
+    if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; i++; continue; }
+    field+=c; i++;
+  }
+  if(field!=='' || row.length){ row.push(field); rows.push(row); }
+  return rows;
+}
+function serializeCsvRows(rows, trailingNl){
+  return rows.map(r=>r.map(csvEscape).join(',')).join('\n') + (trailingNl?'\n':'');
+}
+// Re-stamp PLAYER_ID / PITCHER_ID columns of one stored CSV using the current
+// (post-sync) id resolution keyed off the PLAYER / PITCHER name columns.
+function restampCsvIds(sess, content){
+  const trailingNl=/\n$/.test(String(content||''));
+  const rows=parseCsvRows(content);
+  if(rows.length<2) return { content, changed:false };
+  const header=rows[0].map(h=>String(h||'').trim().toUpperCase());
+  const pName=header.indexOf('PLAYER'), pId=header.indexOf('PLAYER_ID');
+  const ptName=header.indexOf('PITCHER'), ptId=header.indexOf('PITCHER_ID');
+  if(pId<0 && ptId<0) return { content, changed:false };
+  let changed=false;
+  function stamp(row, nameCol, idCol){
+    if(idCol<0 || nameCol<0 || nameCol>=row.length) return;
+    const nm=row[nameCol];
+    if(!nm || !String(nm).trim()) return;
+    const newId=String(playerIdFor(sess, nm)||'');
+    while(row.length<=idCol) row.push('');
+    if(String(row[idCol]||'')!==newId){ row[idCol]=newId; changed=true; }
+  }
+  for(let r=1;r<rows.length;r++){ stamp(rows[r], pName, pId); stamp(rows[r], ptName, ptId); }
+  return changed ? { content: serializeCsvRows(rows, trailingNl), changed:true } : { content, changed:false };
+}
+
 function syncIds(){
   const sess=getCurrentSession();
   if(!sess){ showToast('Create/select an event first'); return; }
@@ -156,8 +202,11 @@ function syncIds(){
   });
   (sess.events||[]).forEach(e=>{ if(e.player) e.player_id=playerIdFor(sess,e.player); if(e.pitcher) e.pitcher_id=playerIdFor(sess,e.pitcher); });
   ['dash','defense','bp'].forEach(k=>{ const st=w[k]; if(st&&st.events) st.events.forEach(e=>{ if(e.player) e.player_id=playerIdFor(sess,e.player); }); });
+  let csvN=0;
+  (sess.csvStorage||[]).forEach(c=>{ const r=restampCsvIds(sess, c.content); if(r.changed){ c.content=r.content; csvN++; } });
   saveAll(); renderAll();
-  showToast(n?('Synced IDs — '+n+' updated'):'IDs already up to date');
+  const parts=[]; if(n) parts.push(n+' player'+(n>1?'s':'')); if(csvN) parts.push(csvN+' stored CSV'+(csvN>1?'s':''));
+  showToast(parts.length?('Synced IDs — '+parts.join(', ')+' updated'):'IDs already up to date');
 }
 
 /* Parse a manually typed Add-field value that may bundle a jersey/player ID with
