@@ -121,22 +121,43 @@ function assignPlayerId(name, id){ const sess=getCurrentSession(); if(!sess) ret
 function playerIdFor(sess, name){
   if(!sess||!name) return '';
   ensurePlayerIds(sess);
+  // IDs are NOT read from the database automatically anymore. We only return
+  // the id that was explicitly linked to this player (via the search picker,
+  // an "name #id" add, Edit Players, or the "Sync IDs" button). Use Sync IDs
+  // to pull/refresh ids from the live Players collection on demand.
   const stored = sess.playerIds[name];
-  const t = String(name).trim().toLowerCase();
-  // Prefer the player's CURRENT id from the live DB cache. Players are often
-  // added with a default/old id (e.g. the auto doc id) before a real player_id
-  // is assigned in the database; the stored value then goes stale. The live
-  // snapshot always reflects the current id, so it wins whenever the player is
-  // found in the database.
-  if (Array.isArray(_playerCache) && _playerCache.length){
-    let hit = _playerCache.find(p => p.name && p.name.trim().toLowerCase() === t);
-    // if the lineup name was changed in the DB (merge/edit), match the stored
-    // id against the cache id or doc id to locate the current record
-    if (!hit && stored!=null && stored!=='') hit = _playerCache.find(p => String(p.id)===String(stored) || String(p.docId)===String(stored));
-    if (hit) return String(hit.id);
-  }
-  // DB unavailable or player not in the database: fall back to the stored id.
   return (stored!=null && stored!=='') ? String(stored) : '';
+}
+/* ===== Sync IDs: on-demand only (no automatic DB reads) =====
+   Resolves every player currently in the session (game lineup + workout lists +
+   anything already in the logs) against the live Players collection by name
+   (falling back to a stored id when the name was renamed in the DB) and stores
+   the real player_id. Re-stamps existing log entries so their exported ids
+   match. Nothing here runs on its own — only when the Sync IDs button is used. */
+function syncIds(){
+  const sess=getCurrentSession();
+  if(!sess){ showToast('Create/select an event first'); return; }
+  if(!(Array.isArray(_playerCache) && _playerCache.length)){ showToast(_playerCacheError?'Database unavailable (offline?)':'Still loading players — try again'); return; }
+  ensurePlayerIds(sess); ensureWorkout(sess);
+  const names=new Set();
+  ['top','bot'].forEach(sd=>{ const t=sess.teams&&sess.teams[sd]; if(t){ (t.pitchers||[]).forEach(n=>n&&names.add(n)); (t.hitters||[]).forEach(n=>n&&names.add(n)); } });
+  const w=sess.workout;
+  if(w.dash) (w.dash.players||[]).forEach(n=>n&&names.add(n));
+  if(w.defense) (w.defense.outfielders||[]).concat(w.defense.infielders||[], w.defense.catchers||[]).forEach(n=>n&&names.add(n));
+  if(w.bp) (w.bp.players||[]).forEach(n=>n&&names.add(n));
+  (sess.events||[]).forEach(e=>{ if(e.player) names.add(e.player); if(e.pitcher) names.add(e.pitcher); });
+  let n=0;
+  names.forEach(name=>{
+    const t=String(name).trim().toLowerCase();
+    let hit=_playerCache.find(p=>p.name && p.name.trim().toLowerCase()===t);
+    const stored=sess.playerIds[name];
+    if(!hit && stored!=null && stored!=='') hit=_playerCache.find(p=>String(p.id)===String(stored)||String(p.docId)===String(stored));
+    if(hit && hit.id!=null && hit.id!==''){ if(String(sess.playerIds[name]||'')!==String(hit.id)){ sess.playerIds[name]=String(hit.id); n++; } }
+  });
+  (sess.events||[]).forEach(e=>{ if(e.player) e.player_id=playerIdFor(sess,e.player); if(e.pitcher) e.pitcher_id=playerIdFor(sess,e.pitcher); });
+  ['dash','defense','bp'].forEach(k=>{ const st=w[k]; if(st&&st.events) st.events.forEach(e=>{ if(e.player) e.player_id=playerIdFor(sess,e.player); }); });
+  saveAll(); renderAll();
+  showToast(n?('Synced IDs — '+n+' updated'):'IDs already up to date');
 }
 
 /* Parse a manually typed Add-field value that may bundle a jersey/player ID with
@@ -1208,6 +1229,8 @@ createSessionBtn.addEventListener('click', async ()=>{
 clearLogBtn.addEventListener('click', clearLog);
 const editPlayersBtn = $('edit-players-btn');
 if (editPlayersBtn) editPlayersBtn.addEventListener('click', editPlayersModal);
+const syncIdsBtn = $('sync-ids-btn');
+if (syncIdsBtn) syncIdsBtn.addEventListener('click', syncIds);
 /* Lock Floating Buttons: when checked, floating buttons can't be dragged or resized
    (prevents accidentally moving them instead of tapping on touch devices). */
 if (lockFloatsCheckbox){

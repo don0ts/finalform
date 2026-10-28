@@ -1120,29 +1120,8 @@ function _backfillPlayer(mp, op){
 }
 // Pure merge: returns a new event {name,date,players,data}. Players are deduped
 // and back-filled; device links are remapped to the kept player's _pid.
-// Stamp players with the real profile ID from the live database (by name).
-// Only fills a BLANK Cubs ID so an explicit, user-entered ID is never clobbered;
-// this replaces any superficial CSV-only identifier with the original profile's
-// true player_id from Firestore.
-function _assignDbProfileIds(arr){
-  if(!Array.isArray(arr) || PIDCUBS_IDX===undefined) return;
-  var db=(typeof _cdb==='function')?_cdb():null;
-  if(!db || typeof db.players!=='function') return;
-  var profs; try{ profs=db.players()||[]; }catch(e){ return; }
-  if(!profs.length) return;
-  var byName={};
-  profs.forEach(function(d){
-    var nm=_fold(d&&d.player_name);
-    var pid=(d&&d.player_id!=null)?String(d.player_id).trim():'';
-    if(nm && pid && byName[nm]===undefined) byName[nm]=pid;
-  });
-  arr.forEach(function(p){
-    var cur=(p[PIDCUBS_IDX]!=null)?String(p[PIDCUBS_IDX]).trim():'';
-    if(cur) return;
-    var nm=_fold(p[NAME_IDX]);
-    if(nm && byName[nm]!==undefined) p[PIDCUBS_IDX]=byName[nm];
-  });
-}
+// Dedup is purely LOCAL to the selected event(s): no global profile-database
+// lookup is performed. IDs come only from the events being merged.
 function computeMergedEvent(selected, sameEvent){
   if(sameEvent===undefined) sameEvent=false;
   // When sameEvent is false (merging DISTINCT events), players are deduped only
@@ -1164,22 +1143,25 @@ function computeMergedEvent(selected, sameEvent){
   // vs 'nm:..' and the roster would show the SAME player twice. Build a
   // name<->id alias map first, then resolve every player to one canonical key
   // so id-keyed and name-keyed copies collapse into a single profile.
+  // Per-event name->id map: within an EVENT scope, remember the ID used by a
+  // same-name player so a duplicate of that name that has NO id can adopt it
+  // (two same-name rows merge as long as one side has no id; two DIFFERENT ids
+  // stay separate). Scoped by _scope(ei) so this never bridges distinct events.
   var idByName={};
-  if(sameEvent){
-    selected.forEach(function(ev){
-      (ev.players||[]).forEach(function(op){
-        var id=(PIDCUBS_IDX!==undefined && op[PIDCUBS_IDX]!=null)?String(op[PIDCUBS_IDX]).trim():'';
-        var nm=_fold(op[NAME_IDX]);
-        if(id && nm && idByName[nm]===undefined) idByName[nm]=id.toLowerCase();
-      });
+  selected.forEach(function(ev,ei){
+    var pre=_scope(ei);
+    (ev.players||[]).forEach(function(op){
+      var id=(PIDCUBS_IDX!==undefined && op[PIDCUBS_IDX]!=null)?String(op[PIDCUBS_IDX]).trim():'';
+      var nm=_fold(op[NAME_IDX]);
+      if(id && nm && idByName[pre+nm]===undefined) idByName[pre+nm]=id.toLowerCase();
     });
-  }
+  });
   function _canonKey(op, ei){
     var pre=_scope(ei);
     var id=(PIDCUBS_IDX!==undefined && op[PIDCUBS_IDX]!=null)?String(op[PIDCUBS_IDX]).trim():'';
     if(id) return pre+'id:'+id.toLowerCase();
     var nm=_fold(op[NAME_IDX]);
-    if(nm) return (sameEvent && idByName[nm]!==undefined)?('id:'+idByName[nm]):(pre+'nm:'+nm);
+    if(nm) return (idByName[pre+nm]!==undefined)?(pre+'id:'+idByName[pre+nm]):(pre+'nm:'+nm);
     return 'uid:'+(op._pid||(Math.random().toString(36).slice(2)));
   }
   selected.forEach(function(ev,ei){
@@ -1268,11 +1250,9 @@ function computeMergedEvent(selected, sameEvent){
     mp._dev.blastL=mine.some(function(x){ return (x.hand||'')==='L'; });
   });
   function pick(field){ for(var i=0;i<selected.length;i++){ var v=selected[i][field]; if(v!==''&&v!=null) return v; } return ''; }
-  // Stamp each merged player with the REAL database profile ID (not a throwaway
-  // CSV-only value): look the player up by name in the live profile database
-  // and, when its Cubs ID is blank, write the original profile's player_id into
-  // the record so the proper ID is stored and exported everywhere.
-  _assignDbProfileIds(mergedPlayers);
+  // Dedup stays purely LOCAL to the merged events — no global profile-database
+  // lookup. IDs come only from the events themselves (a blank-id duplicate
+  // adopts a same-name, same-event player's id via _canonKey above).
   mergedPlayers.forEach(function(mp){ delete mp.__ei; });
   return { name:(primary.name||pick('name'))||'', date:(primary.date||pick('date'))||'', players:mergedPlayers, data:mergedData };
 }
