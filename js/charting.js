@@ -1635,123 +1635,182 @@ let lastPitchGroup = 'FB', lastVelo = 85;
 async function pitchGroupVeloModal(ev){
   let chosen = ev.pitch_group || lastPitchGroup || 'FB';
   const curV = ev.velo || lastVelo || 85;
-  const startNoVelo = (ev.velo==='' || ev.velo==null) && !!ev.pitch_group;
-  const html = '<div class="sect-lbl">Pitch Group</div>'
-    + '<div class="grp-checks">'
-    + PITCH_GROUPS.map(g=>'<label class="grp-check"><input type="checkbox" name="pg" value="'+g+'"'+(g===chosen?' checked':'')+'/> '+PITCH_GROUP_LABEL[g]+'</label>').join('')
-    + '</div>'
+  let noVelo = (ev.velo==='' || ev.velo==null) && !!ev.pitch_group;
+  // Working copy of the pitch location; "Change Pitch Zone" edits these.
+  let px = (ev.pitch_x!=null?ev.pitch_x:50), py = (ev.pitch_y!=null?ev.pitch_y:47), inzone = !!ev.inzone;
+  // Strike-zone box as % of the sz-area (matches .sz-zone: 130x164 inside 500x460, centered 50%/47%).
+  const ZW=130/500*100, ZH=164/460*100, ZCX=50, ZCY=47;
+  function calcInzone(x,y){ return x>=ZCX-ZW/2 && x<=ZCX+ZW/2 && y>=ZCY-ZH/2 && y<=ZCY+ZH/2; }
+  const header = '<div class="modal-head">'
+    + '<h4 class="modal-head-title">Velo &amp; Pitch Group</h4>'
+    + '<button type="button" class="btn small ghost chg-zone" id="chg-zone-btn">Change Pitch Zone</button>'
+    + '</div>';
+  const miniZone = '<div class="mini-sz-wrap" id="mini-sz-wrap" style="display:none">'
+    + '<div class="mini-sz-hint">Tap the new pitch location</div>'
+    + '<div class="mini-sz-area" id="mini-sz-area"><div class="mini-sz-zone"></div><div class="mini-sz-dot" id="mini-sz-dot"></div></div>'
+    + '</div>';
+  const html = header
     + '<div class="velo-row"><label>Velo (mph)</label><select id="velo-sel">'+veloOptions(curV)+'</select></div>'
-    + '<label class="no-velo"><input type="checkbox" id="no-velo"'+(startNoVelo?' checked':'')+'/> No Velo Registered</label>';
-  const p = showModal({ title:'Pitch Group & Velo', html, buttons:[{label:'Next',value:'next',className:'btn',id:'pgv-next'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
-  const boxes = Array.from(modalRoot.querySelectorAll('input[name=pg]'));
-  boxes.forEach(b=> b.addEventListener('change', ()=>{ if(b.checked){ chosen=b.value; boxes.forEach(o=>{ if(o!==b) o.checked=false; }); } else { chosen=''; } }));
+    + '<label class="no-velo"><input type="checkbox" id="no-velo"'+(noVelo?' checked':'')+'/> No Velo Registered <span class="hk">N</span></label>'
+    + '<div class="sect-lbl">Pitch Group</div>'
+    + '<div class="grp-btns">'
+    + PITCH_GROUPS.map(g=>'<button type="button" class="pk grp-pick hollow'+(g===chosen?' selected':'')+'" data-pg="'+g+'">'+PITCH_GROUP_LABEL[g]+' <span class="hk">'+(g==='FB'?'F':g==='BB'?'B':'O')+'</span></button>').join('')
+    + '</div>'
+    + miniZone;
+  const p = showModal({ html, buttons:[{label:'Next',value:'next',className:'btn',id:'pgv-next'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
+  const grpBtns = Array.from(modalRoot.querySelectorAll('[data-pg]'));
+  function paintGrp(){ grpBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-pg')===chosen)); }
+  grpBtns.forEach(b=> b.addEventListener('click', ()=>{ chosen=b.getAttribute('data-pg'); paintGrp(); }));
   const veloSel = $('velo-sel');
   const noVeloBox = $('no-velo');
-  function syncVelo(){ const off=noVeloBox.checked; veloSel.disabled=off; const vr=veloSel.closest('.velo-row'); if(vr) vr.classList.toggle('velo-disabled', off); }
+  function syncVelo(){ const off=noVeloBox.checked; noVelo=off; veloSel.disabled=off; const vr=veloSel.closest('.velo-row'); if(vr) vr.classList.toggle('velo-disabled', off); }
   noVeloBox.addEventListener('change', syncVelo);
   syncVelo();
-  // Type-ahead search: accumulate typed digits so "77" jumps straight to 77
-  // (instead of the native select cycling 70,71,72... on each repeated key).
   let veloBuf='', veloBufTimer=null;
   veloSel.addEventListener('keydown', function(e){
-    if(e.key>='0' && e.key<='9'){
-      e.preventDefault();
-      if(veloBufTimer) clearTimeout(veloBufTimer);
-      veloBuf += e.key;
-      let match=null;
-      for(let v=VELO_MIN; v<=VELO_MAX; v++){ if(String(v)===veloBuf){ match=v; break; } }
+    if(e.key>='0' && e.key<='9'){ e.preventDefault(); if(veloBufTimer) clearTimeout(veloBufTimer); veloBuf += e.key;
+      let match=null; for(let v=VELO_MIN; v<=VELO_MAX; v++){ if(String(v)===veloBuf){ match=v; break; } }
       if(match==null){ for(let v=VELO_MIN; v<=VELO_MAX; v++){ if(String(v).indexOf(veloBuf)===0){ match=v; break; } } }
       if(match==null){ veloBuf=e.key; for(let v=VELO_MIN; v<=VELO_MAX; v++){ if(String(v).indexOf(veloBuf)===0){ match=v; break; } } }
       if(match!=null) veloSel.value=String(match);
       veloBufTimer=setTimeout(()=>{ veloBuf=''; }, 1000);
     }
   });
-  // Open with the Velo dropdown pre-selected (focused) but NOT expanded.
-  if (!noVeloBox.checked){ setTimeout(()=>{ try{ veloSel.focus(); }catch(e){} }, 0); }
-  // Enter always triggers Next, even while the Velo dropdown holds focus.
-  const pgvNext = $('pgv-next');
-  function pgvOnKey(e){ if(e.key==='Enter'){ e.preventDefault(); e.stopPropagation(); if(pgvNext) pgvNext.click(); } }
+  const chgBtn = $('chg-zone-btn'), mzWrap = $('mini-sz-wrap'), mzArea = $('mini-sz-area'), mzDot = $('mini-sz-dot');
+  function placeDot(){ mzDot.style.left=px+'%'; mzDot.style.top=py+'%'; mzDot.classList.toggle('inzone', inzone); }
+  placeDot();
+  chgBtn.addEventListener('click', ()=>{ const show = mzWrap.style.display==='none'; mzWrap.style.display = show?'block':'none'; chgBtn.classList.toggle('on', show); });
+  mzArea.addEventListener('click', (e)=>{ const r=mzArea.getBoundingClientRect(); px=Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)); py=Math.max(0,Math.min(100,(e.clientY-r.top)/r.height*100)); inzone=calcInzone(px,py); placeDot(); });
+  function pgvOnKey(e){
+    const tag=document.activeElement && document.activeElement.tagName;
+    if(e.key==='Enter'){ e.preventDefault(); e.stopPropagation(); const nx=$('pgv-next'); if(nx) nx.click(); return; }
+    const k=(e.key||'').toLowerCase();
+    if(tag==='SELECT' && k>='0' && k<='9') return;
+    if(k==='n'){ e.preventDefault(); noVeloBox.checked=!noVeloBox.checked; syncVelo(); }
+    else if(k==='f'){ e.preventDefault(); chosen='FB'; paintGrp(); }
+    else if(k==='b'){ e.preventDefault(); chosen='BB'; paintGrp(); }
+    else if(k==='o'){ e.preventDefault(); chosen='OS'; paintGrp(); }
+  }
   modalRoot.addEventListener('keydown', pgvOnKey);
+  paintGrp();
+  if (!noVeloBox.checked){ setTimeout(()=>{ try{ veloSel.focus(); }catch(e){} }, 0); }
   const res = await p;
   modalRoot.removeEventListener('keydown', pgvOnKey);
   if (res!=='next') return null;
-  if (!chosen){ const ck=modalRoot.querySelector('input[name=pg]:checked'); chosen = ck?ck.value:'FB'; }
+  if (!chosen) chosen='FB';
   const velo = noVeloBox.checked ? '' : parseInt(veloSel.value,10);
-  // Remember this pitch for the next time the modal opens.
   lastPitchGroup = chosen;
   if (velo !== '' && !isNaN(velo)) lastVelo = velo;
-  return { group:chosen, velo:velo };
+  ev.pitch_x=px; ev.pitch_y=py; ev.inzone=inzone;
+  return { group:chosen, velo:velo, inzone:inzone };
 }
-async function locationSwingModal(ev, geomInzone){
+async function pitchInfoModal(ev, geomInzone){
   const inzone = (geomInzone!=null?geomInzone:ev.inzone);
   const extraCur = (ev.location==='NonComp'||ev.location==='IntBall') ? ev.location : '';
   let swingSel = (ev.swing==='InPlay'||ev.swing==='Whiff'||ev.swing==='Take'||ev.swing==='Foul') ? ev.swing : '';
-  let bs = ev.ball_strike || '';
-  let bsManual = !!ev.ball_strike;
+  let outcome=null;
   const html = '<div class="sect-lbl">Extra Info</div>'
     + '<div class="loc-checks">'
     + LOC_OPTS.map(o=>'<label><input type="checkbox" name="locx" value="'+o[0]+'"'+(o[0]===extraCur?' checked':'')+'/> '+o[1]+'</label>').join('')
     + '</div>'
     + '<div class="sect-lbl">Swing Outcome</div>'
     + '<div class="swing-row">'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="InPlay">InPlay</button>'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="Whiff">Whiff</button>'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="Take">Take</button>'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="Foul">Foul</button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="InPlay">InPlay <span class="hk">i</span></button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="Whiff">Whiff <span class="hk">w</span></button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="Take">Take <span class="hk">t</span></button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="Foul">Foul <span class="hk">f</span></button>'
     + '</div>'
-    + '<div class="sect-lbl">Strike or Ball</div>'
-    + '<div class="bs-checks">'
-    +   '<label><input type="checkbox" name="bs" value="Strike"/> Strike</label>'
-    +   '<label><input type="checkbox" name="bs" value="Ball"/> Ball</label>'
+    + '<div class="field-sect" id="field-sect" style="display:none">'
+    +   '<div class="muted-note" style="margin:6px 0">Tap where the ball was hit. Behind the plate defaults to C; beyond the fence is a Home Run.</div>'
+    +   '<div class="field-wrap">'+buildFieldSvg()+'</div>'
     + '</div>'
-    + '<div class="result-sect" id="result-sect" style="display:none">'
-    +   '<div class="sect-lbl">Result</div>'
-    +   '<div class="result-checks" id="result-checks"></div>'
+    + '<div class="sect-lbl">Result</div>'
+    + '<div class="result-row">'
+    +   '<div class="result-top">'
+    +     '<button type="button" class="pk res-pick hollow" data-res="Strike">Strike</button>'
+    +     '<button type="button" class="pk res-pick hollow" data-res="Ball">Ball</button>'
+    +   '</div>'
+    +   '<div class="result-bot">'
+    +     '<button type="button" class="pk res-pick hollow submit-btn" data-res="K">K</button>'
+    +     '<button type="button" class="pk res-pick hollow submit-btn" data-res="BB">BB</button>'
+    +     '<button type="button" class="pk res-pick hollow submit-btn" data-res="HBP">HBP</button>'
+    +     '<button type="button" class="pk res-pick hollow submit-btn" data-res="iBB">iBB</button>'
+    +   '</div>'
     + '</div>'
-    + '<button type="button" class="pk result-submit" data-resolve="submit">Submit</button>';
+    + '<button type="button" data-resolve="done" id="pi-done" style="display:none"></button>';
   const p = showModal({ title:'Pitch Info', html, showBack:true, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
+  const doneBtn = $('pi-done');
+  function finish(o){ outcome=o; doneBtn.click(); }
+  function locVal(){ const picked=modalRoot.querySelector('input[name=locx]:checked'); return picked?picked.value:(inzone?'InZone':'OutOfZone'); }
   const swBtns = Array.from(modalRoot.querySelectorAll('[data-sw]'));
-  const bsBtns = Array.from(modalRoot.querySelectorAll('input[name=bs]'));
+  const resBtns = Array.from(modalRoot.querySelectorAll('[data-res]'));
+  const fieldSect = modalRoot.querySelector('#field-sect');
   const locxBtns = Array.from(modalRoot.querySelectorAll('input[name=locx]'));
-  const resultSect = modalRoot.querySelector('#result-sect');
-  const resultChecks = modalRoot.querySelector('#result-checks');
-  function defaultBS(){
-    if (swingSel==='Whiff'||swingSel==='Foul'||swingSel==='InPlay') return 'Strike';
-    if (swingSel==='Take') return inzone?'Strike':'Ball';
-    return 'Ball';
-  }
-  function paintBS(){ bsBtns.forEach(b=> b.checked = (b.value===bs)); const grayBall = (swingSel==='Whiff'||swingSel==='Foul'||swingSel==='InPlay'); bsBtns.forEach(b=>{ if(b.value==='Ball'){ b.disabled=grayBall; const lab=b.closest('label'); if(lab) lab.classList.toggle('bs-disabled', grayBall); } }); }
-  function renderResult(){
-    if (swingSel==='Whiff'||swingSel==='Take'){
-      resultSect.style.display='block';
-      const flags = swingSel==='Whiff' ? ['K'] : ['K','BB','HBP','iBB'];
-      resultChecks.innerHTML = flags.map(r=>'<label><input type="checkbox" name="resr" value="'+r+'"/> '+r+'</label>').join('');
-      (ev.result||[]).forEach(r=>{ const cb=resultChecks.querySelector('input[name=resr][value="'+r+'"]'); if(cb) cb.checked=true; });
-    } else { resultSect.style.display='none'; resultChecks.innerHTML=''; }
-  }
-  function paintSwing(){ swBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-sw')===swingSel)); if(swingSel==='Whiff'||swingSel==='Foul'||swingSel==='InPlay'){ bs='Strike'; } else if(!bsManual){ bs=defaultBS(); } paintBS(); renderResult(); }
-  swBtns.forEach(b=> b.addEventListener('click', ()=>{ swingSel=b.getAttribute('data-sw'); paintSwing();
-    // Foul and InPlay auto-submit the step immediately (InPlay then opens the field).
-    if (swingSel==='Foul' || swingSel==='InPlay'){ const sb=modalRoot.querySelector('[data-resolve="submit"]'); if(sb) sb.click(); }
-  }));
-  bsBtns.forEach(b=> b.addEventListener('change', ()=>{ if(b.checked){ bs=b.value; bsManual=true; bsBtns.forEach(o=>{ if(o!==b) o.checked=false; }); } else { bs=''; bsManual=true; } }));
   locxBtns.forEach(b=> b.addEventListener('change', ()=>{ if(b.checked){ locxBtns.forEach(o=>{ if(o!==b) o.checked=false; }); } }));
-  if (swingSel){ paintSwing(); } else { paintBS(); }
-  const res = await p;
-  if (res==='__back__') return '__back__';
-  if (res==='cancel' || res==null) return null;
-  const picked = modalRoot.querySelector('input[name=locx]:checked');
-  const loc = picked ? picked.value : (inzone?'InZone':'OutOfZone');
-  const result = Array.from(modalRoot.querySelectorAll('input[name=resr]:checked')).map(c=>c.value);
-  const finalSwing = swingSel || 'Take';
-  let finalBS = bs;
-  if (!finalBS){
-    if (finalSwing==='Whiff'||finalSwing==='Foul'||finalSwing==='InPlay') finalBS='Strike';
-    else if (finalSwing==='Take') finalBS=inzone?'Strike':'Ball';
-    else finalBS='Ball';
+  function resDisabled(name){
+    if(swingSel==='InPlay') return true;
+    if(swingSel==='Whiff') return !(name==='Strike'||name==='K');
+    if(swingSel==='Foul') return name!=='Strike';
+    return false;
   }
-  const resultOut = (finalSwing==='Whiff'||finalSwing==='Take') ? result : [];
-  return { location:loc, swing:finalSwing, result:resultOut, ball_strike:finalBS };
+  function paintRes(){ resBtns.forEach(b=>{ const dis=resDisabled(b.getAttribute('data-res')); b.disabled=dis; b.classList.toggle('res-off', dis); }); }
+  function paintSwing(){ swBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-sw')===swingSel)); fieldSect.style.display=(swingSel==='InPlay')?'block':'none'; paintRes(); }
+  swBtns.forEach(b=> b.addEventListener('click', ()=>{ swingSel=b.getAttribute('data-sw'); paintSwing(); }));
+  resBtns.forEach(b=> b.addEventListener('click', ()=>{
+    if(b.disabled) return;
+    const r=b.getAttribute('data-res');
+    const sw = swingSel || 'Take';
+    let bs, result=[];
+    if(r==='Strike'){ bs='Strike'; }
+    else if(r==='Ball'){ bs='Ball'; }
+    else if(r==='K'){ bs='Strike'; result=['K']; }
+    else { bs='Ball'; result=[r]; }
+    finish({ location:locVal(), swing:sw, ball_strike:bs, result:result, pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'' });
+  }));
+  // InPlay field: tap landing location -> gated batted-ball popup.
+  const wrap=modalRoot.querySelector('.field-wrap');
+  const svgEl=modalRoot.querySelector('.field-svg');
+  const SVGNS='http://www.w3.org/2000/svg';
+  let markerEl=null, bbOpen=false;
+  function placeMarker(sx,sy){ if(markerEl) markerEl.remove(); markerEl=document.createElementNS(SVGNS,'g'); markerEl.setAttribute('class','fld-marker'); markerEl.setAttribute('pointer-events','none'); const r1=document.createElementNS(SVGNS,'circle'); r1.setAttribute('cx',sx); r1.setAttribute('cy',sy); r1.setAttribute('r','9'); r1.setAttribute('class','fld-marker-ring'); const r2=document.createElementNS(SVGNS,'circle'); r2.setAttribute('cx',sx); r2.setAttribute('cy',sy); r2.setAttribute('r','3.4'); r2.setAttribute('class','fld-marker-dot'); markerEl.appendChild(r1); markerEl.appendChild(r2); svgEl.appendChild(markerEl); }
+  function clearMarker(){ if(markerEl){ markerEl.remove(); markerEl=null; } }
+  function nearestPos(sx,sy){ let best=null,bd=1e12; Object.keys(POS_CENTERS).forEach(k=>{ const c=POS_CENTERS[k]; const d=(c.x-sx)*(c.x-sx)+(c.y-sy)*(c.y-sy); if(d<bd){ bd=d; best=k; } }); return best; }
+  async function onFieldClick(clientX, clientY){
+    if(bbOpen) return;
+    const r=svgEl.getBoundingClientRect();
+    const sx=(clientX-r.left)/r.width*FIELD_VB_W;
+    const sy=(clientY-r.top)/r.height*FIELD_VB_H;
+    placeMarker(sx,sy);
+    const dx=sx-FIELD_H.x, up=FIELD_H.y-sy; const rad=Math.hypot(dx,up); const ang=Math.atan2(dx,up)*180/Math.PI;
+    let pos, num, isHR=false;
+    if(up<=0){ pos='C'; num='2'; }
+    else if(rad>FIELD_FENCE && Math.abs(ang)<=47){ isHR=true; pos='HR'; num= ang<-15?'7':(ang>15?'9':'8'); }
+    else { pos=nearestPos(sx,sy); num=POS_NUM[pos]||''; }
+    bbOpen=true;
+    const bb = await battedBallPopup(ev, pos, num, isHR, wrap, sx, sy);
+    bbOpen=false;
+    if(bb===null){ clearMarker(); return; }
+    const hx=sx/FIELD_VB_W, hy=sy/FIELD_VB_H;
+    finish({ location:locVal(), swing:'InPlay', ball_strike:'Strike', result:[], pa_outcome:bb.pa_outcome, contact_quality:bb.contact_quality, batted_ball:bb.batted_ball, batted_to:bb.batted_to, hit_x:hx, hit_y:hy });
+  }
+  svgEl.addEventListener('click', (e)=>{ onFieldClick(e.clientX, e.clientY); });
+  function piOnKey(e){
+    if(bbOpen) return;
+    const tag=document.activeElement && document.activeElement.tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT') return;
+    const k=(e.key||'').toLowerCase();
+    if(k==='i'){ e.preventDefault(); swingSel='InPlay'; paintSwing(); }
+    else if(k==='w'){ e.preventDefault(); swingSel='Whiff'; paintSwing(); }
+    else if(k==='t'){ e.preventDefault(); swingSel='Take'; paintSwing(); }
+    else if(k==='f'){ e.preventDefault(); swingSel='Foul'; paintSwing(); }
+  }
+  modalRoot.addEventListener('keydown', piOnKey);
+  if(swingSel) paintSwing(); else paintRes();
+  const res = await p;
+  modalRoot.removeEventListener('keydown', piOnKey);
+  if(res==='__back__') return '__back__';
+  if(res==='done' && outcome) return outcome;
+  return null;
 }
 async function confirmCancel(){
   const res = await showModal({ title:'Cancel?', message:'Are you sure you want to cancel?', buttons:[{label:'Yes',value:true,className:'btn warn'},{label:'No',value:false,className:'btn hollow'}] });
@@ -1823,91 +1882,54 @@ function buildFieldSvg(){
   svg+='</svg>';
   return svg;
 }
-async function fieldSprayModal(ev){
-  const html='<div class="muted-note" style="margin-bottom:6px">Tap where the ball was hit. Behind the plate defaults to C; beyond the fence is a Home Run.</div>'
-    +'<div class="field-wrap">'+buildFieldSvg()+'</div>'
-    +'<button type="button" data-resolve="submit" id="field-submit-hidden" style="display:none"></button>';
-  const p=showModal({title:'Field / Spray', html, showBack:true, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost'}]});
-  let fieldResult=null;
-  const wrap=modalRoot.querySelector('.field-wrap');
-  const svgEl=modalRoot.querySelector('.field-svg');
-  const SVGNS='http://www.w3.org/2000/svg';
-  let popupEl=null, markerEl=null;
-  function closePopup(){ if(popupEl){ popupEl.remove(); popupEl=null; } }
-  function placeMarker(sx,sy){
-    if(markerEl) markerEl.remove();
-    markerEl=document.createElementNS(SVGNS,'g');
-    markerEl.setAttribute('class','fld-marker'); markerEl.setAttribute('pointer-events','none');
-    const r1=document.createElementNS(SVGNS,'circle'); r1.setAttribute('cx',sx); r1.setAttribute('cy',sy); r1.setAttribute('r','9'); r1.setAttribute('class','fld-marker-ring');
-    const r2=document.createElementNS(SVGNS,'circle'); r2.setAttribute('cx',sx); r2.setAttribute('cy',sy); r2.setAttribute('r','3.4'); r2.setAttribute('class','fld-marker-dot');
-    markerEl.appendChild(r1); markerEl.appendChild(r2); svgEl.appendChild(markerEl);
-  }
-  function nearestPos(sx,sy){
-    let best=null, bd=1e12;
-    Object.keys(POS_CENTERS).forEach(k=>{ const c=POS_CENTERS[k]; const d=(c.x-sx)*(c.x-sx)+(c.y-sy)*(c.y-sy); if(d<bd){ bd=d; best=k; } });
-    return best;
-  }
-  function openPopup(pos, num, sx, sy, isHR){
-    closePopup();
-    const wr=wrap.getBoundingClientRect();
-    const px0=sx/FIELD_VB_W*wr.width, py0=sy/FIELD_VB_H*wr.height;
-    popupEl=document.createElement('div'); popupEl.className='field-popup';
+async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
+  return new Promise(resolve=>{
+    const BB_DEFS=[['GB','G'],['LD','L'],['FB','F'],['PU','P']];
+    const CQ_DEFS=[['Bunt','B'],['Weak','W'],['Avg','A'],['Hard','H']];
+    const PA_DEFS=[['1B','1B','1'],['2B','2B','2'],['3B','3B','3'],['HR','HR','4'],['OUT','OUT','O'],['FC','FC','F'],['E','E','E'],['DP','DP','D'],['SAC','SACB','B'],['SACF','SACF','S']];
+    let pickBB='', pickCQ='', pickBTo=num||'', pickPA=isHR?'HR':'';
     const title=isHR?'Home Run':'Hit to '+pos;
-    const curQ=ev.contact_quality||'Avg';
-    const curPA=ev.pa_outcome||'';
-    const paRow=isHR?'':'<div class="fp-row"><span>PA Outcome</span><div class="fp-pick fp-pa">'+PA_OUTCOMES.map(o=>'<button type="button" class="fp-opt'+(o===curPA?' on':'')+'" data-v="'+o+'">'+o+'</button>').join('')+'</div></div>';
+    const btoOpts=['1','2','3','4','5','6','7','8','9'].map(n=>'<button type="button" class="fp-opt bto-opt'+(n===pickBTo?' on':'')+'" data-v="'+n+'">'+n+' <small>'+NUM_POS[n]+'</small></button>').join('');
+    const PA_LIST=(isHR?[['HR','HR','4']]:PA_DEFS);
+    const paOpts=PA_LIST.map(d=>'<button type="button" class="fp-opt pa-opt" data-v="'+d[0]+'">'+d[1]+' <span class="hk">'+d[2]+'</span></button>').join('');
+    const popupEl=document.createElement('div'); popupEl.className='field-popup';
     popupEl.innerHTML='<button type="button" class="fp-close" aria-label="Close">\u00d7</button>'
       +'<div class="fp-title">'+title+'</div>'
-      +paRow
-      +'<div class="fp-row"><span>Contact Quality</span><div class="fp-pick fp-cq">'+CONTACT_QUALITY.map(q=>'<button type="button" class="fp-opt'+(q===curQ?' on':'')+'" data-v="'+q+'">'+q+'</button>').join('')+'</div></div>'
-      +'<div class="fp-row"><span>Batted Ball Type</span><div class="fp-pick fp-bb">'+TRAJECTORY.map(t=>'<button type="button" class="fp-opt'+(t===ev.batted_ball?' on':'')+'" data-v="'+t+'">'+t+'</button>').join('')+'</div></div>'
-      +'<div class="fp-row"><span>Batted To</span><select class="fp-bto">'+['1','2','3','4','5','6','7','8','9'].map(n=>'<option value="'+n+'"'+(n===num?' selected':'')+'>'+n+' - '+NUM_POS[n]+'</option>').join('')+'</select></div>'
-      +'<div class="fp-actions"><button type="button" class="btn small fp-ok">Save Hit</button></div>';
+      +'<div class="fp-row" id="bb-row"><span>Batted Ball Type</span><div class="fp-pick fp-bb">'+BB_DEFS.map(d=>'<button type="button" class="fp-opt" data-v="'+d[0]+'">'+d[0]+' <span class="hk">'+d[1]+'</span></button>').join('')+'</div></div>'
+      +'<div class="fp-row" id="cq-row" style="display:none"><span>Contact Quality</span><div class="fp-pick fp-cq">'+CQ_DEFS.map(d=>'<button type="button" class="fp-opt" data-v="'+d[0]+'">'+d[0]+' <span class="hk">'+d[1]+'</span></button>').join('')+'</div></div>'
+      +'<div class="fp-row" id="bto-row" style="display:none"><span>Batted To</span><div class="fp-pick fp-bto">'+btoOpts+'</div></div>'
+      +'<div class="fp-row" id="pa-row" style="display:none"><span>PA Outcome</span><div class="fp-pick fp-pa">'+paOpts+'</div></div>';
     wrap.appendChild(popupEl);
+    const wr=wrap.getBoundingClientRect();
+    const px0=sx/FIELD_VB_W*wr.width, py0=sy/FIELD_VB_H*wr.height;
     const pw=popupEl.offsetWidth, ph=popupEl.offsetHeight;
     let left=px0+14; if(left+pw>wr.width) left=px0-pw-14; if(left<4) left=4;
     let top=py0+14; if(top+ph>wr.height) top=wr.height-ph-4; if(top<4) top=4;
     popupEl.style.left=left+'px'; popupEl.style.top=top+'px';
-    let pickQ=curQ, pickBB=ev.batted_ball||'', pickPA=isHR?'HR':curPA;
-    const cqWrap=popupEl.querySelector('.fp-cq'), bbWrap=popupEl.querySelector('.fp-bb'), paWrap=popupEl.querySelector('.fp-pa');
-    function paint(wrp,val){ wrp.querySelectorAll('.fp-opt').forEach(o=>o.classList.toggle('on', o.getAttribute('data-v')===val)); }
-    if(paWrap) paWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=>{ pickPA=b.getAttribute('data-v'); paint(paWrap,pickPA); paWrap.classList.remove('fp-needpick'); }));
-    cqWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=>{ pickQ=b.getAttribute('data-v'); paint(cqWrap,pickQ); }));
-    bbWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=>{ const v=b.getAttribute('data-v'); pickBB=(pickBB===v?'':v); paint(bbWrap,pickBB); if(pickBB==='PU'){ pickQ='Weak'; paint(cqWrap,pickQ); } }));
-    popupEl.querySelector('.fp-close').addEventListener('click',()=>{ closePopup(); });
-    popupEl.querySelector('.fp-ok').addEventListener('click',()=>{
-      if(!isHR && !pickPA){ if(paWrap) paWrap.classList.add('fp-needpick'); return; }
-      fieldResult={ pa_outcome:(isHR?'HR':pickPA), contact_quality:pickQ, batted_ball:pickBB, batted_to:popupEl.querySelector('.fp-bto').value, homerun:isHR };
-      const sb=document.getElementById('field-submit-hidden'); if(sb) sb.click();
-    });
-  }
-  function handleClick(clientX, clientY){
-    const r=svgEl.getBoundingClientRect();
-    const sx=(clientX-r.left)/r.width*FIELD_VB_W;
-    const sy=(clientY-r.top)/r.height*FIELD_VB_H;
-    placeMarker(sx,sy);
-    const dx=sx-FIELD_H.x, up=FIELD_H.y-sy;
-    const rad=Math.hypot(dx,up);
-    const ang=Math.atan2(dx,up)*180/Math.PI;
-    if(up<=0){ openPopup('C','2',sx,sy,false); return; }               // behind the plate -> C
-    if(rad>FIELD_FENCE && Math.abs(ang)<=47){                            // beyond fence, fair -> HR
-      const hrNum= ang<-15?'7':(ang>15?'9':'8');
-      openPopup('HR',hrNum,sx,sy,true); return;
+    const cqRow=popupEl.querySelector('#cq-row'), btoRow=popupEl.querySelector('#bto-row'), paRow=popupEl.querySelector('#pa-row');
+    const bbWrap=popupEl.querySelector('.fp-bb'), cqWrap=popupEl.querySelector('.fp-cq'), btoWrap=popupEl.querySelector('.fp-bto'), paWrap=popupEl.querySelector('.fp-pa');
+    function paint(w,val){ w.querySelectorAll('.fp-opt').forEach(o=> o.classList.toggle('on', o.getAttribute('data-v')===val)); }
+    function cleanup(){ document.removeEventListener('keydown',onKey,true); popupEl.remove(); }
+    function done(){ cleanup(); resolve({ pa_outcome:pickPA, contact_quality:pickCQ, batted_ball:pickBB, batted_to:pickBTo, homerun:isHR }); }
+    function cancel(){ cleanup(); resolve(null); }
+    function pickBBType(v){ pickBB=v; paint(bbWrap,pickBB); if(pickBB==='PU'){ pickCQ='Weak'; paint(cqWrap,pickCQ); } cqRow.style.display='block'; }
+    function pickCQType(v){ pickCQ=v; paint(cqWrap,pickCQ); btoRow.style.display='block'; paint(btoWrap,pickBTo); }
+    function pickBToVal(v){ pickBTo=v; paint(btoWrap,pickBTo); paRow.style.display='block'; }
+    bbWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickBBType(b.getAttribute('data-v'))));
+    cqWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickCQType(b.getAttribute('data-v'))));
+    btoWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickBToVal(b.getAttribute('data-v'))));
+    paWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=>{ pickPA=b.getAttribute('data-v'); done(); }));
+    popupEl.querySelector('.fp-close').addEventListener('click', cancel);
+    function onKey(e){
+      const k=(e.key||''); const lo=k.toLowerCase();
+      if(k==='Escape'){ e.stopImmediatePropagation(); e.preventDefault(); cancel(); return; }
+      if(paRow.style.display!=='none'){ const d=PA_LIST.find(x=>x[2].toLowerCase()===lo); if(d){ e.preventDefault(); e.stopImmediatePropagation(); pickPA=d[0]; done(); return; } }
+      if(btoRow.style.display!=='none' && k>='1' && k<='9'){ e.preventDefault(); e.stopImmediatePropagation(); pickBToVal(k); return; }
+      if(cqRow.style.display!=='none'){ const d=CQ_DEFS.find(x=>x[1].toLowerCase()===lo); if(d){ e.preventDefault(); e.stopImmediatePropagation(); pickCQType(d[0]); return; } }
+      { const d=BB_DEFS.find(x=>x[1].toLowerCase()===lo); if(d){ e.preventDefault(); e.stopImmediatePropagation(); pickBBType(d[0]); return; } }
     }
-    const pos=nearestPos(sx,sy); openPopup(pos, POS_NUM[pos]||'', sx,sy,false);
-  }
-  svgEl.addEventListener('click',(e)=>{ handleClick(e.clientX,e.clientY); });
-  function onKey(e){ if(e.key==='Escape' && popupEl){ e.stopImmediatePropagation(); e.preventDefault(); closePopup(); } }
-  function onDocDown(e){ if(popupEl && !popupEl.contains(e.target) && !svgEl.contains(e.target)){ closePopup(); } }
-  document.addEventListener('keydown', onKey, true);
-  document.addEventListener('mousedown', onDocDown, true);
-  const res=await p;
-  document.removeEventListener('keydown', onKey, true);
-  document.removeEventListener('mousedown', onDocDown, true);
-  closePopup();
-  if(res==='__back__') return '__back__';
-  if(res==='submit' && fieldResult) return fieldResult;
-  return null;
+    document.addEventListener('keydown', onKey, true);
+  });
 }
 async function classifyPitch(ev, geomInzone){
   let step=0;
@@ -1915,23 +1937,18 @@ async function classifyPitch(ev, geomInzone){
     if(step===0){
       const pg = await pitchGroupVeloModal(ev);
       if(pg===null){ if(await confirmCancel()) return false; else continue; }
-      ev.pitch_group=pg.group; ev.velo=pg.velo; step=1;
-    } else if(step===1){
-      const loc = await locationSwingModal(ev, geomInzone!=null?geomInzone:ev.inzone);
-      if(loc==='__back__'){ step=0; continue; }
-      if(loc===null){ if(await confirmCancel()) return false; else continue; }
-      ev.location=loc.location; ev.swing=loc.swing; ev.ball_strike=loc.ball_strike||'';
-      if(ev.swing==='Whiff' || ev.swing==='Take'){
-        ev.result = loc.result||[]; ev.pa_outcome=''; ev.contact_quality=''; ev.batted_ball=''; ev.batted_to=''; ev.play=evPlayLabel(ev); return true;
-      }
-      if(ev.swing==='Foul'){ ev.result=[]; ev.pa_outcome=''; ev.contact_quality=''; ev.batted_ball=''; ev.batted_to=''; ev.play=evPlayLabel(ev); return true; }
-      ev.result=[]; step=2;
+      ev.pitch_group=pg.group; ev.velo=pg.velo;
+      if(pg.inzone!=null) ev.inzone=pg.inzone;
+      step=1;
     } else {
-      const fld = await fieldSprayModal(ev);
-      if(fld==='__back__'){ step=1; continue; }
-      if(fld===null){ if(await confirmCancel()) return false; else continue; }
-      ev.pa_outcome = fld.homerun ? 'HR' : (fld.pa_outcome||'');
-      ev.contact_quality=fld.contact_quality; ev.batted_ball=fld.batted_ball; ev.batted_to=fld.batted_to;
+      const info = await pitchInfoModal(ev, ev.inzone);
+      if(info==='__back__'){ step=0; continue; }
+      if(info===null){ if(await confirmCancel()) return false; else continue; }
+      ev.location=info.location; ev.swing=info.swing; ev.ball_strike=info.ball_strike||'';
+      ev.result=info.result||[];
+      ev.pa_outcome=info.pa_outcome||''; ev.contact_quality=info.contact_quality||''; ev.batted_ball=info.batted_ball||''; ev.batted_to=info.batted_to||'';
+      if('hit_x' in info){ ev.hit_x=info.hit_x; ev.hit_y=info.hit_y; }
+      else { ev.hit_x=null; ev.hit_y=null; }
       ev.play=evPlayLabel(ev);
       return true;
     }
@@ -2018,6 +2035,21 @@ const editPlayersBtn = $('edit-players-btn');
 if (editPlayersBtn) editPlayersBtn.addEventListener('click', ()=> editPlayersModal());
 const syncIdsBtn = $('sync-ids-btn');
 if (syncIdsBtn) syncIdsBtn.addEventListener('click', ()=> syncIds());
+function hotkeysHelpModal(){
+  const row=(k,d)=>'<div class="hkh-row"><span class="hkh-key">'+k+'</span><span class="hkh-desc">'+d+'</span></div>';
+  const sect=(t,rows)=>'<div class="hkh-sect"><div class="hkh-title">'+t+'</div>'+rows+'</div>';
+  const html=
+    sect('Strike Zone', row('Tap','Score a new pitch at that spot')+row('Press-hold 0.5s','Select / edit the pitch under the cursor'))
+    +sect('Velo &amp; Pitch Group (step 1)', row('N','No Velo Registered')+row('F','Fastball')+row('B','Breaking Ball')+row('O','OffSpeed')+row('Enter','Next'))
+    +sect('Pitch Info (step 2)', row('i','InPlay')+row('w','Whiff')+row('t','Take')+row('f','Foul'))
+    +sect('Batted Ball Type', row('G','Groundball')+row('L','Linedrive')+row('F','Flyball')+row('P','Popup'))
+    +sect('Contact Quality', row('B','Bunt')+row('W','Weak')+row('A','Avg')+row('H','Hard'))
+    +sect('Batted To', row('1-9','Fielder position the ball was hit to'))
+    +sect('PA Outcome', row('1','1B')+row('2','2B')+row('3','3B')+row('4','HR')+row('O','OUT')+row('F','FC')+row('E','E')+row('D','DP')+row('B','SACB')+row('S','SACF'));
+  showModal({ title:'Hotkeys', html:'<div class="hkh-wrap">'+html+'</div>', buttons:[{label:'Close',value:'close',className:'btn'}] });
+}
+const hotkeysHelpBtn = $('hotkeys-help-btn');
+if (hotkeysHelpBtn) hotkeysHelpBtn.addEventListener('click', ()=> hotkeysHelpModal());
 if (amAddPitcherInput){
   amAddPitcherInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ amAddPitcherBtn.click(); e.preventDefault(); }});
   amAddPitcherInput.addEventListener('blur', ()=> amAddPitcherInput.value=titleCaseName(amAddPitcherInput.value));

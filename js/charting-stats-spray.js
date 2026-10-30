@@ -95,10 +95,19 @@ function buildSprayField(balls){
   svg+='<polygon points="'+ff(FH.x)+','+ff(FH.y-5)+' '+ff(FH.x+5)+','+ff(FH.y-1)+' '+ff(FH.x+3.5)+','+ff(FH.y+5)+' '+ff(FH.x-3.5)+','+ff(FH.y+5)+' '+ff(FH.x-5)+','+ff(FH.y-1)+'" class="fs-basemk"/>';
   const perPos={};
   balls.forEach(b=>{
-    const c=POS_CENT[b.pos]; const i=(perPos[b.pos]=(perPos[b.pos]||0)+1)-1;
-    const ring=Math.floor(i/6); const ang=(i%6)*(Math.PI/3)+ring*0.5;
-    const rad=ring? (10+ring*9):(i? 9:0);
-    const cx=c.x+Math.cos(ang)*rad, cy=c.y+Math.sin(ang)*rad;
+    let cx, cy; const e=b.e;
+    if(e && typeof e.hit_x==='number' && typeof e.hit_y==='number'){
+      // Map the actual landing point from the charting field (viewBox 424x460,
+      // home at 212,418, fence r=300) into this spray chart (home 200,372, fence r=232).
+      const fx=e.hit_x*424, fy=e.hit_y*460; const dx=fx-212, up=418-fy;
+      const ang2=Math.atan2(dx,up); const rad2=Math.hypot(dx,up)/300*232;
+      cx=200+rad2*Math.sin(ang2); cy=372-rad2*Math.cos(ang2);
+    } else {
+      const c=POS_CENT[b.pos]; const i=(perPos[b.pos]=(perPos[b.pos]||0)+1)-1;
+      const ring=Math.floor(i/6); const ang=(i%6)*(Math.PI/3)+ring*0.5;
+      const rad=ring? (10+ring*9):(i? 9:0);
+      cx=c.x+Math.cos(ang)*rad; cy=c.y+Math.sin(ang)*rad;
+    }
     const rlbl = sprayMode==='result' ? (resultCat(b.pa)? resultCat(b.pa).label : b.pa) : ((TRAJ_CATS.find(c=>c.key===b.bb)||{}).label || 'Unspecified');
     const ttl = esc(rlbl+' \u2014 to '+(posFullName(b.pos)||('pos '+b.pos)));
     svg+='<circle class="fs-dot" cx="'+ff(cx)+'" cy="'+ff(cy)+'" r="6" fill="'+catColor(b)+'" stroke="rgba(0,0,0,0.5)" stroke-width="1"><title>'+ttl+'</title></circle>';
