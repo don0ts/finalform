@@ -1993,7 +1993,7 @@ if (szCardEl){
       if (!isNaN(idx)){
         holdCircleIdx=idx;
         cancelHold();
-        holdTimer=setTimeout(()=>{ holdTimer=null; holdFired=true; openOptionsModal(idx); }, 1500);
+        holdTimer=setTimeout(()=>{ holdTimer=null; holdFired=true; openOptionsModal(idx); }, 500);
       }
     }
   });
