@@ -451,12 +451,18 @@ function renderSessionSelect(){ sessionSelect.innerHTML=''; state.sessions.forEa
 
 /* ===== GAME: pitcher count ===== */
 function countPitcherEvents(sess, pitcherName){ if (!sess || !sess.events) return 0; return sess.events.filter(e => e.pitcher === pitcherName).length; }
+// Total balls/strikes thrown by a pitcher. InPlay stores ball_strike='Strike',
+// so it counts as a strike here (per spec) even though it does not ramp the
+// displayed strike count in the zone.
+function countPitcherBS(sess, pitcherName){ let b=0,s=0; if (sess && sess.events){ sess.events.forEach(e=>{ if (e.pitcher===pitcherName){ if (e.ball_strike==='Ball') b++; else if (e.ball_strike==='Strike') s++; } }); } return {b,s}; }
 function updatePitcherCountBadges(){
   const sess = getCurrentSession(); if (!sess) return;
   const team = sess.teams[state.currentSide];
   team.pitchers.forEach((p, idx) => {
     const badge = pitchersList.querySelector('.player-row:nth-child('+(idx+1)+') .pitcher-count');
     if (badge){ const newText = '('+countPitcherEvents(sess,p)+')'; if (badge.textContent !== newText){ badge.textContent=newText; badge.classList.remove('badge-pop'); void badge.offsetWidth; badge.classList.add('badge-pop'); } }
+    const bsb = pitchersList.querySelector('.player-row:nth-child('+(idx+1)+') .pitcher-bs');
+    if (bsb){ const bs=countPitcherBS(sess,p); const t='(B: '+bs.b+', S: '+bs.s+')'; if (bsb.textContent !== t){ bsb.textContent=t; bsb.classList.remove('badge-pop'); void bsb.offsetWidth; bsb.classList.add('badge-pop'); } }
   });
 }
 
@@ -477,7 +483,9 @@ function renderPlayerLists(){
     const name = document.createElement('div'); name.className='player-name'; name.textContent = (state.compactNames?compactName(p):p);
     name.addEventListener('click', ()=>{ team.selectedPitcher = p; saveAll(); renderPlayerLists(); });
     const badge = document.createElement('span'); badge.className='pitcher-count'; badge.textContent='('+countPitcherEvents(sess,p)+')';
-    left.appendChild(role); left.appendChild(name); left.appendChild(badge);
+    const bsNow = countPitcherBS(sess,p);
+    const bsBadge = document.createElement('span'); bsBadge.className='pitcher-bs'; bsBadge.textContent='(B: '+bsNow.b+', S: '+bsNow.s+')';
+    left.appendChild(role); left.appendChild(name); left.appendChild(badge); left.appendChild(bsBadge);
 
     const btns = document.createElement('div'); btns.className='player-buttons';
     const up = mkIconBtn('\u2191', idx===0);
@@ -1968,13 +1976,37 @@ async function strikeZoneClick(e){
   saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges();
   showToast('Pitch #'+ev.id+' '+(inzone?'(In Zone)':'(Out of Zone)')+' - '+msToToastTime(ev.timecode_ms));
 }
-/* The WHOLE Strike Zone card is a click target (not just the inner zone box). */
+/* The WHOLE Strike Zone card is a click target (not just the inner zone box).
+   Tap (short press) anywhere - including on an existing circle - scores a NEW
+   pitch at that spot. To SELECT an existing circle (open its options), press
+   and hold on it for 1.5s. */
 const szCardEl = document.querySelector('.sz-card');
-if (szCardEl) szCardEl.addEventListener('click', (e)=>{
-  if (e.target.closest('button,input,select,a,textarea,label')) return;
-  const circle=e.target.closest('.sz-circle'); if (circle){ const idx=parseInt(circle.dataset.idx,10); if(!isNaN(idx)) openOptionsModal(idx); return; }
-  strikeZoneClick(e);
-});
+if (szCardEl){
+  let holdTimer=null, holdFired=false, holdCircleIdx=null, downX=0, downY=0;
+  function cancelHold(){ if (holdTimer){ clearTimeout(holdTimer); holdTimer=null; } }
+  szCardEl.addEventListener('pointerdown', (e)=>{
+    if (e.target.closest('button,input,select,a,textarea,label')) return;
+    holdFired=false; holdCircleIdx=null; downX=e.clientX; downY=e.clientY;
+    const circle=e.target.closest('.sz-circle');
+    if (circle){
+      const idx=parseInt(circle.dataset.idx,10);
+      if (!isNaN(idx)){
+        holdCircleIdx=idx;
+        cancelHold();
+        holdTimer=setTimeout(()=>{ holdTimer=null; holdFired=true; openOptionsModal(idx); }, 1500);
+      }
+    }
+  });
+  szCardEl.addEventListener('pointermove', (e)=>{ if (holdTimer && Math.hypot(e.clientX-downX, e.clientY-downY) > 12) cancelHold(); });
+  szCardEl.addEventListener('pointerup', (e)=>{
+    if (e.target.closest('button,input,select,a,textarea,label')) return;
+    cancelHold();
+    if (holdFired){ holdFired=false; return; }   // hold already opened the selection
+    strikeZoneClick(e);                          // short tap -> score a new pitch at this spot
+  });
+  szCardEl.addEventListener('pointercancel', cancelHold);
+  szCardEl.addEventListener('pointerleave', cancelHold);
+}
 
 /* ===== Active Matchup quick-add (same behavior as the Players lineup add) ===== */
 const amAddPitcherInput = $('am-add-pitcher');

@@ -85,6 +85,8 @@ input[type="text"], input[type="date"], select, textarea{background:transparent;
 .icon-btn:disabled{opacity:0.35}
 
 .pitcher-count { display:inline-flex;align-items:center;justify-content:center; padding:2px 7px; border-radius:999px; background:var(--pitcher-count-bg); color:#cdd6e0; font-size:12px; font-weight:700; line-height:1.2; border:1px solid rgba(255,255,255,0.06); transition: transform .1s ease; }
+.pitcher-bs { display:inline-flex;align-items:center;justify-content:center; padding:2px 7px; border-radius:999px; background:rgba(90,104,120,0.35); color:#9fb0c2; font-size:11px; font-weight:700; line-height:1.2; border:1px solid rgba(255,255,255,0.06); transition: transform .1s ease; }
+.pitcher-bs.badge-pop { animation: badgePop 350ms ease; }
 .pitcher-count.badge-pop { animation: badgePop 350ms ease; }
 @keyframes badgePop { 0%{transform:scale(1)} 30%{transform:scale(1.25);background:#7a8a9a;color:#fff} 100%{transform:scale(1)} }
 
@@ -239,6 +241,7 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:6px}
   #toast-container { bottom:20%; }
   .toast { padding:11px 15px; font-size:14px; }
   .pitcher-count { font-size:11px; padding:1px 5px; }
+  .pitcher-bs { font-size:10px; padding:1px 5px; }
 }
 .player-suggest{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:500;background:linear-gradient(180deg,#0b1724,#07121b);border:1px solid var(--soft-border);border-radius:10px;padding:5px;display:none;flex-direction:column;gap:3px;max-height:260px;overflow:auto;box-shadow:0 14px 36px rgba(2,6,23,.65);min-width:0}
 .player-suggest.open{display:flex}
