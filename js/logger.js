@@ -1265,6 +1265,58 @@ function gameCsvDownload(kind){
   }
 }
 
+/* ===== Data CSV (Measurables-format export) ===== */
+function collectSessionPlayers(sess){
+  const map=new Map();
+  ['top','bot'].forEach(sd=>{ const t=sess.teams&&sess.teams[sd]; if(!t) return;
+    (t.pitchers||[]).forEach(n=>{ if(!n) return; const e=map.get(n)||{name:n,pitcher:false}; e.pitcher=true; map.set(n,e); });
+    (t.hitters||[]).forEach(n=>{ if(!n) return; const e=map.get(n)||{name:n,pitcher:false}; map.set(n,e); });
+  });
+  return Array.from(map.values());
+}
+function buildDataCsv(sess, vals){
+  const DEV_EXPORT=[
+    {label:'Trackman',    bt:'Bats', tt:'Throws'},
+    {label:'Blast',       bt:'Bats', tt:'Throws'},
+    {label:'Forceplates', bt:'bats', tt:'throws'}
+  ];
+  const SLOTS=2;
+  const TOTAL=5+DEV_EXPORT.length*SLOTS*5;
+  const meta=['Metadata']; while(meta.length<TOTAL) meta.push('');
+  const hdr=['Name','player_id_cubs','event_date','is_pitcher_test','Position'];
+  DEV_EXPORT.forEach(d=>{ for(let s=0;s<SLOTS;s++){ hdr.push(d.label+'_ID', d.label, d.label+'_'+d.bt, d.label+'_'+d.tt, d.label+'_tod'); } });
+  const lines=[meta.map(csvEscape).join(','), hdr.map(csvEscape).join(',')];
+  vals.forEach(v=>{
+    const row=[ v.name, v.id||'', (sess.date||''), v.pitcher?'TRUE':'FALSE', v.pitcher?'P':'' ];
+    DEV_EXPORT.forEach((d,di)=>{
+      for(let s=0;s<SLOTS;s++){
+        if(di===0 && s===0){ row.push(v.id||'', v.name, '', '', v.tod||''); }
+        else { row.push('','','','',''); }
+      }
+    });
+    lines.push(row.map(csvEscape).join(','));
+  });
+  return lines.join('\r\n');
+}
+async function exportDataCsv(){
+  const sess=getCurrentSession();
+  if(!sess){ return showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); }
+  const roster=collectSessionPlayers(sess);
+  if(!roster.length){ return showModal({title:'No players',message:'Add at least one player first.',buttons:[{label:'OK',value:true}]}); }
+  const rows=roster.map((p,i)=>'<tr><td style="padding:4px 6px">'+escapeHtml(p.name)+(p.pitcher?' <small style="color:var(--muted)">(P)</small>':'')+'</td>'
+    +'<td style="padding:4px 6px"><input id="dc-id-'+i+'" value="'+escapeHtml(playerIdFor(sess,p.name)||'')+'" placeholder="Trackman ID" style="width:120px;padding:6px;border-radius:6px;border:1px solid var(--soft-border)"/></td>'
+    +'<td style="padding:4px 6px"><input id="dc-tod-'+i+'" placeholder="Time of Day" style="width:120px;padding:6px;border-radius:6px;border:1px solid var(--soft-border)"/></td></tr>').join('');
+  const html='<div style="max-height:52vh;overflow:auto"><table style="border-collapse:collapse;width:100%"><thead><tr>'
+    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Player</th>'
+    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Trackman ID</th>'
+    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Time of Day</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  const res=await showModal({ title:'Data CSV', html, buttons:[{label:'Export',value:'export',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
+  if(res!=='export') return;
+  const vals=roster.map((p,i)=>({ name:p.name, pitcher:p.pitcher, id:($('dc-id-'+i)?$('dc-id-'+i).value.trim():''), tod:($('dc-tod-'+i)?$('dc-tod-'+i).value.trim():'') }));
+  downloadCsv(sanitizeEventName(sess.name)+'_Data.csv', buildDataCsv(sess, vals));
+  showToast('Data CSV exported');
+}
+
 /* ===== wire up ===== */
 sessionSelect.addEventListener('change', (e)=>{ state.currentSessionId=e.target.value; saveAll(); renderAll(); });
 createSessionBtn.addEventListener('click', async ()=>{
@@ -1319,6 +1371,7 @@ attachPlayerSearch($('add-bp'),   (name,id)=> addDbWorkoutPlayer('bp', name, id)
 exportBtn.addEventListener('click', (e)=>{ e.stopPropagation(); gameCsvMenu.classList.toggle('open'); });
 document.addEventListener('click', (e)=>{ if (!gameCsvMenu.contains(e.target) && e.target!==exportBtn) gameCsvMenu.classList.remove('open'); });
 gameCsvMenu.addEventListener('click', (e)=>{ const t=e.target.closest('[data-gcsv]'); if(!t) return; gameCsvDownload(t.getAttribute('data-gcsv')); gameCsvMenu.classList.remove('open'); });
+if ($('data-csv-btn')) $('data-csv-btn').addEventListener('click', exportDataCsv);
 
 $('copy-pitchers').addEventListener('click', ()=> copyGameList('pitchers'));
 $('paste-pitchers').addEventListener('click', ()=> pasteGameList('pitchers'));

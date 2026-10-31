@@ -1322,6 +1322,59 @@ function gameCsvDownload(kind){
   }
 }
 
+/* ===== Data CSV (Measurables-format export) ===== */
+function collectSessionPlayers(sess){
+  // Unique players across both teams; pitcher flag if listed as a pitcher anywhere.
+  const map=new Map();
+  ['top','bot'].forEach(sd=>{ const t=sess.teams&&sess.teams[sd]; if(!t) return;
+    (t.pitchers||[]).forEach(n=>{ if(!n) return; const e=map.get(n)||{name:n,pitcher:false}; e.pitcher=true; map.set(n,e); });
+    (t.hitters||[]).forEach(n=>{ if(!n) return; const e=map.get(n)||{name:n,pitcher:false}; map.set(n,e); });
+  });
+  return Array.from(map.values());
+}
+function buildDataCsv(sess, vals){
+  const DEV_EXPORT=[
+    {label:'Trackman',    bt:'Bats', tt:'Throws'},
+    {label:'Blast',       bt:'Bats', tt:'Throws'},
+    {label:'Forceplates', bt:'bats', tt:'throws'}
+  ];
+  const SLOTS=2;
+  const TOTAL=5+DEV_EXPORT.length*SLOTS*5;
+  const meta=['Metadata']; while(meta.length<TOTAL) meta.push('');
+  const hdr=['Name','player_id_cubs','event_date','is_pitcher_test','Position'];
+  DEV_EXPORT.forEach(d=>{ for(let s=0;s<SLOTS;s++){ hdr.push(d.label+'_ID', d.label, d.label+'_'+d.bt, d.label+'_'+d.tt, d.label+'_tod'); } });
+  const lines=[meta.map(csvEscape).join(','), hdr.map(csvEscape).join(',')];
+  vals.forEach(v=>{
+    const row=[ v.name, v.id||'', (sess.date||''), v.pitcher?'TRUE':'FALSE', v.pitcher?'P':'' ];
+    DEV_EXPORT.forEach((d,di)=>{
+      for(let s=0;s<SLOTS;s++){
+        if(di===0 && s===0){ row.push(v.id||'', v.name, '', '', v.tod||''); }
+        else { row.push('','','','',''); }
+      }
+    });
+    lines.push(row.map(csvEscape).join(','));
+  });
+  return lines.join('\r\n');
+}
+async function exportDataCsv(){
+  const sess=getCurrentSession();
+  if(!sess){ return showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); }
+  const roster=collectSessionPlayers(sess);
+  if(!roster.length){ return showModal({title:'No players',message:'Add at least one player first.',buttons:[{label:'OK',value:true}]}); }
+  const rows=roster.map((p,i)=>'<tr><td style="padding:4px 6px">'+escapeHtml(p.name)+(p.pitcher?' <small style="color:var(--muted)">(P)</small>':'')+'</td>'
+    +'<td style="padding:4px 6px"><input id="dc-id-'+i+'" value="'+escapeHtml(playerIdFor(sess,p.name)||'')+'" placeholder="Trackman ID" style="width:120px;padding:6px;border-radius:6px;border:1px solid var(--soft-border)"/></td>'
+    +'<td style="padding:4px 6px"><input id="dc-tod-'+i+'" placeholder="Time of Day" style="width:120px;padding:6px;border-radius:6px;border:1px solid var(--soft-border)"/></td></tr>').join('');
+  const html='<div style="max-height:52vh;overflow:auto"><table style="border-collapse:collapse;width:100%"><thead><tr>'
+    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Player</th>'
+    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Trackman ID</th>'
+    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Time of Day</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  const res=await showModal({ title:'Data CSV', html, buttons:[{label:'Export',value:'export',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
+  if(res!=='export') return;
+  const vals=roster.map((p,i)=>({ name:p.name, pitcher:p.pitcher, id:($('dc-id-'+i)?$('dc-id-'+i).value.trim():''), tod:($('dc-tod-'+i)?$('dc-tod-'+i).value.trim():'') }));
+  downloadCsv(sanitizeEventName(sess.name)+'_Data.csv', buildDataCsv(sess, vals));
+  showToast('Data CSV exported');
+}
+
 /* ===== wire up ===== */
 if (logSearchInput){ logSearchInput.addEventListener('input', ()=>{ logSearchTerm=logSearchInput.value||''; if(logSearchClear) logSearchClear.style.display=logSearchTerm?'block':'none'; renderLog(); }); }
 if (logSearchClear){ logSearchClear.style.display='none'; logSearchClear.addEventListener('click', ()=>{ logSearchTerm=''; if(logSearchInput) logSearchInput.value=''; logSearchClear.style.display='none'; renderLog(); }); }
@@ -1374,6 +1427,7 @@ attachPlayerSearch($('add-bp'),   (name,id)=> addDbWorkoutPlayer('bp', name, id)
 exportBtn.addEventListener('click', (e)=>{ e.stopPropagation(); gameCsvMenu.classList.toggle('open'); });
 document.addEventListener('click', (e)=>{ if (!gameCsvMenu.contains(e.target) && e.target!==exportBtn) gameCsvMenu.classList.remove('open'); });
 gameCsvMenu.addEventListener('click', (e)=>{ const t=e.target.closest('[data-gcsv]'); if(!t) return; gameCsvDownload(t.getAttribute('data-gcsv')); gameCsvMenu.classList.remove('open'); });
+if ($('data-csv-btn')) $('data-csv-btn').addEventListener('click', exportDataCsv);
 
 $('copy-pitchers').addEventListener('click', ()=> copyGameList('pitchers'));
 $('paste-pitchers').addEventListener('click', ()=> pasteGameList('pitchers'));
@@ -1473,11 +1527,8 @@ function pitchInfoStr(ev){
   return parts.join(' \u00b7 ');
 }
 function circleClass(ev){
-  if (ev.swing==='Whiff') return 'c-whiff';
-  if (ev.swing==='Foul') return 'c-foul';
-  if (ev.swing==='InPlay') return 'c-inplay';
-  if (ev.ball_strike==='Strike') return 'c-cstrike';
-  return 'c-ball';
+  // Pitch-zone markers are colored purely by location: out of zone = green, in zone = red.
+  return ev.inzone ? 'c-inzone' : 'c-outzone';
 }
 
 /* ----- play grouping + selection + descriptions ----- */
@@ -1636,20 +1687,25 @@ async function pitchGroupVeloModal(ev){
   let chosen = ev.pitch_group || lastPitchGroup || 'FB';
   const curV = ev.velo || lastVelo || 85;
   let noVelo = (ev.velo==='' || ev.velo==null) && !!ev.pitch_group;
-  // Working copy of the pitch location; "Change Pitch Zone" edits these.
+  // Working copy of the pitch location; "Change Pitch Location" edits these.
   let px = (ev.pitch_x!=null?ev.pitch_x:50), py = (ev.pitch_y!=null?ev.pitch_y:47), inzone = !!ev.inzone;
   // Strike-zone box as % of the sz-area (matches .sz-zone: 130x164 inside 500x460, centered 50%/47%).
   const ZW=130/500*100, ZH=164/460*100, ZCX=50, ZCY=47;
   function calcInzone(x,y){ return x>=ZCX-ZW/2 && x<=ZCX+ZW/2 && y>=ZCY-ZH/2 && y<=ZCY+ZH/2; }
   const header = '<div class="modal-head">'
     + '<h4 class="modal-head-title">Velo &amp; Pitch Group</h4>'
-    + '<button type="button" class="btn small ghost chg-zone" id="chg-zone-btn">Change Pitch Zone</button>'
+    + '<button type="button" class="btn small ghost chg-zone" id="chg-zone-btn">Change Pitch Location</button>'
     + '</div>';
   const miniZone = '<div class="mini-sz-wrap" id="mini-sz-wrap" style="display:none">'
     + '<div class="mini-sz-hint">Tap the new pitch location</div>'
     + '<div class="mini-sz-area" id="mini-sz-area"><div class="mini-sz-zone"></div><div class="mini-sz-dot" id="mini-sz-dot"></div></div>'
     + '</div>';
   const html = header
+    + '<div class="sect-lbl">Zone</div>'
+    + '<div class="zone-btns">'
+    +   '<button type="button" class="pk hollow zone-pick" data-zone="in">In Zone</button>'
+    +   '<button type="button" class="pk hollow zone-pick" data-zone="out">Out of Zone</button>'
+    + '</div>'
     + '<div class="velo-row"><label>Velo (mph)</label><select id="velo-sel">'+veloOptions(curV)+'</select></div>'
     + '<label class="no-velo"><input type="checkbox" id="no-velo"'+(noVelo?' checked':'')+'/> No Velo Registered</label>'
     + '<div class="sect-lbl">Pitch Group</div>'
@@ -1661,6 +1717,10 @@ async function pitchGroupVeloModal(ev){
   const grpBtns = Array.from(modalRoot.querySelectorAll('[data-pg]'));
   function paintGrp(){ grpBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-pg')===chosen)); }
   grpBtns.forEach(b=> b.addEventListener('click', ()=>{ chosen=b.getAttribute('data-pg'); paintGrp(); }));
+  const zoneBtns = Array.from(modalRoot.querySelectorAll('[data-zone]'));
+  function paintZone(){ zoneBtns.forEach(b=> b.classList.toggle('selected', (b.getAttribute('data-zone')==='in')===inzone)); }
+  zoneBtns.forEach(b=> b.addEventListener('click', ()=>{ inzone=(b.getAttribute('data-zone')==='in'); paintZone(); placeDot(); }));
+  paintZone();
   const veloSel = $('velo-sel');
   const noVeloBox = $('no-velo');
   function syncVelo(){ noVelo=noVeloBox.checked; }
@@ -1680,7 +1740,7 @@ async function pitchGroupVeloModal(ev){
   function placeDot(){ mzDot.style.left=px+'%'; mzDot.style.top=py+'%'; mzDot.classList.toggle('inzone', inzone); }
   placeDot();
   chgBtn.addEventListener('click', ()=>{ const show = mzWrap.style.display==='none'; mzWrap.style.display = show?'block':'none'; chgBtn.classList.toggle('on', show); });
-  mzArea.addEventListener('click', (e)=>{ const r=mzArea.getBoundingClientRect(); px=Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)); py=Math.max(0,Math.min(100,(e.clientY-r.top)/r.height*100)); inzone=calcInzone(px,py); placeDot(); });
+  mzArea.addEventListener('click', (e)=>{ const r=mzArea.getBoundingClientRect(); px=Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)); py=Math.max(0,Math.min(100,(e.clientY-r.top)/r.height*100)); inzone=calcInzone(px,py); placeDot(); paintZone(); });
   function submitGroup(g){ const b=grpBtns.find(x=>x.getAttribute('data-pg')===g); if(b){ chosen=g; paintGrp(); b.click(); } }
   function pgvOnKey(e){
     const k=(e.key||'').toLowerCase();
@@ -1797,28 +1857,6 @@ async function pitchInfoModal(ev, geomInzone){
     finish({ location:locVal(), swing:'InPlay', ball_strike:'Strike', result:[], pa_outcome:bb.pa_outcome, contact_quality:bb.contact_quality, batted_ball:bb.batted_ball, batted_to:bb.batted_to, hit_x:hx, hit_y:hy });
   }
   svgEl.addEventListener('click', (e)=>{ onFieldClick(e.clientX, e.clientY); });
-  // Blue target reticle that tracks the cursor across the field.
-  let reticleEl=null;
-  function ensureReticle(){
-    if(reticleEl) return reticleEl;
-    reticleEl=document.createElementNS(SVGNS,'g'); reticleEl.setAttribute('class','fld-reticle'); reticleEl.setAttribute('pointer-events','none'); reticleEl.style.display='none';
-    const ring=document.createElementNS(SVGNS,'circle'); ring.setAttribute('r','10'); ring.setAttribute('class','fld-reticle-ring');
-    const lh=document.createElementNS(SVGNS,'line'); lh.setAttribute('class','fld-reticle-line');
-    const lv=document.createElementNS(SVGNS,'line'); lv.setAttribute('class','fld-reticle-line');
-    const dot=document.createElementNS(SVGNS,'circle'); dot.setAttribute('r','1.6'); dot.setAttribute('class','fld-reticle-dot');
-    reticleEl.appendChild(ring); reticleEl.appendChild(lh); reticleEl.appendChild(lv); reticleEl.appendChild(dot);
-    svgEl.appendChild(reticleEl);
-    reticleEl._ring=ring; reticleEl._lh=lh; reticleEl._lv=lv; reticleEl._dot=dot;
-    return reticleEl;
-  }
-  function moveReticle(clientX,clientY){ const r=svgEl.getBoundingClientRect(); const sx=(clientX-r.left)/r.width*FIELD_VB_W; const sy=(clientY-r.top)/r.height*FIELD_VB_H; const g=ensureReticle(); g.style.display='block';
-    g._ring.setAttribute('cx',sx); g._ring.setAttribute('cy',sy);
-    g._lh.setAttribute('x1',sx-14); g._lh.setAttribute('y1',sy); g._lh.setAttribute('x2',sx+14); g._lh.setAttribute('y2',sy);
-    g._lv.setAttribute('x1',sx); g._lv.setAttribute('y1',sy-14); g._lv.setAttribute('x2',sx); g._lv.setAttribute('y2',sy+14);
-    g._dot.setAttribute('cx',sx); g._dot.setAttribute('cy',sy);
-  }
-  svgEl.addEventListener('mousemove', (e)=>{ if(!bbOpen) moveReticle(e.clientX,e.clientY); });
-  svgEl.addEventListener('mouseleave', ()=>{ if(reticleEl) reticleEl.style.display='none'; });
   function piOnKey(e){
     if(bbOpen) return;
     const k=(e.key||'').toLowerCase();
@@ -1826,6 +1864,12 @@ async function pitchInfoModal(ev, geomInzone){
     else if(k==='w'){ e.preventDefault(); swingSel='Whiff'; paintSwing(); }
     else if(k==='t'){ e.preventDefault(); swingSel='Take'; paintSwing(); }
     else if(k==='f'){ e.preventDefault(); swingSel='Foul'; paintSwing(); finish({ location:locVal(), swing:'Foul', ball_strike:'Strike', result:[], pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'' }); }
+    else {
+      const resMap={ 's':'Strike', 'b':'Ball', '1':'K', '2':'BB', '3':'HBP', '4':'iBB' };
+      const rk=(e.key==='S'||e.key==='s')?'s':k;
+      const target=resMap[rk];
+      if(target){ const btn=resBtns.find(b=> b.getAttribute('data-res')===target); if(btn && !btn.disabled){ e.preventDefault(); btn.click(); } }
+    }
   }
   document.addEventListener('keydown', piOnKey, true);
   if(swingSel) paintSwing(); else paintRes();
@@ -1914,7 +1958,7 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
     const title=isHR?'Home Run':'Hit to '+pos;
     const btoOpts=['1','2','3','4','5','6','7','8','9'].map(n=>'<button type="button" class="fp-opt bto-opt'+(n===pickBTo?' on':'')+'" data-v="'+n+'">'+n+' <small>'+NUM_POS[n]+'</small></button>').join('');
     const PA_LIST=(isHR?[['HR','HR','4']]:PA_DEFS);
-    const paOpts=PA_LIST.map(d=>'<button type="button" class="fp-opt pa-opt" data-v="'+d[0]+'">'+d[1]+'</button>').join('');
+    const paOpts=PA_LIST.map(d=>'<button type="button" class="fp-opt pa-opt submit-btn" data-v="'+d[0]+'">'+d[1]+'</button>').join('');
     const popupEl=document.createElement('div'); popupEl.className='field-popup';
     popupEl.innerHTML='<button type="button" class="fp-close" aria-label="Close">\u00d7</button>'
       +'<div class="fp-title">'+title+'</div>'
@@ -1936,7 +1980,7 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
     function done(){ cleanup(); resolve({ pa_outcome:pickPA, contact_quality:pickCQ, batted_ball:pickBB, batted_to:pickBTo, homerun:isHR }); }
     function cancel(){ cleanup(); resolve(null); }
     function pickBBType(v){ pickBB=v; paint(bbWrap,pickBB); cqRow.style.display='block'; if(pickBB==='PU'){ pickCQType('Weak'); } }
-    function pickCQType(v){ pickCQ=v; paint(cqWrap,pickCQ); btoRow.style.display='block'; paint(btoWrap,pickBTo); }
+    function pickCQType(v){ pickCQ=v; paint(cqWrap,pickCQ); btoRow.style.display='block'; paint(btoWrap,pickBTo); if(pickBTo){ pickBToVal(pickBTo); } }
     function pickBToVal(v){ pickBTo=v; paint(btoWrap,pickBTo); paRow.style.display='block'; }
     bbWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickBBType(b.getAttribute('data-v'))));
     cqWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickCQType(b.getAttribute('data-v'))));

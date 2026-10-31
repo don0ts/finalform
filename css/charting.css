@@ -401,6 +401,9 @@ select option, select optgroup{background:#0b1724;color:#eaf6ff}
 .sz-circle.c-whiff{background:rgba(214,30,30,0.85);border-color:#ff3b3b}
 .sz-circle.c-foul{background:rgba(240,200,40,0.8);border-color:#f0c828}
 .sz-circle.c-inplay{background:rgba(79,157,255,0.75);border-color:#4f9dff}
+/* location-based pitch markers: out of zone = green, in zone = red */
+.sz-circle.c-outzone{background:rgba(63,185,80,0.7);border-color:#3fb950}
+.sz-circle.c-inzone{background:rgba(224,70,70,0.8);border-color:#ff5a5a}
 
 /* ===== Field / Spray modal ===== */
 .field-wrap{position:relative;width:100%;max-width:560px;margin:0 auto;aspect-ratio:424 / 460}
@@ -451,6 +454,8 @@ select option, select optgroup{background:#0b1724;color:#eaf6ff}
 .pk.hollow.selected{background:rgba(79,157,255,0.16);color:#eaf6ff;box-shadow:none}
 .pk.hollow:disabled,.pk.hollow.res-off{opacity:.35;cursor:not-allowed;filter:grayscale(.6)}
 .grp-btns{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0 12px}
+.zone-btns{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:6px 0 12px}
+.zone-pick{padding:12px 8px;font-size:14px}
 .grp-pick{padding:14px 8px;font-size:14px}
 .result-row{display:flex;flex-direction:column;gap:8px;margin:6px 0 4px}
 .result-top{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
@@ -461,16 +466,12 @@ select option, select optgroup{background:#0b1724;color:#eaf6ff}
 .submit-btn:hover:not(:disabled),.submit-btn.hollow:hover:not(:disabled){background:rgba(224,90,90,0.14);color:#ffd9d9}
 .submit-btn.selected,.submit-btn.hollow.selected{background:rgba(224,90,90,0.22);color:#ffdede;box-shadow:0 0 0 2px var(--contact-red,#e05a5a) inset}
 .submit-btn:disabled,.submit-btn.res-off{opacity:.35;cursor:not-allowed;filter:grayscale(.6)}
-/* blue target reticle that follows the cursor on the field */
-.field-svg .fld-reticle-ring{fill:none;stroke:#4f9dff;stroke-width:2;opacity:.95}
-.field-svg .fld-reticle-line{stroke:#4f9dff;stroke-width:1.4;stroke-linecap:round;opacity:.9}
-.field-svg .fld-reticle-dot{fill:#4f9dff}
 .mini-sz-wrap{margin:4px 0 8px}
 .mini-sz-hint{font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
 .mini-sz-area{position:relative;width:170px;height:156px;margin:0 auto;background:linear-gradient(180deg,#0f1a2b,#17263c);border:1px solid var(--soft-border);border-radius:8px;cursor:crosshair}
 .mini-sz-zone{position:absolute;left:37%;width:26%;top:29.2%;height:35.6%;border:1.5px solid rgba(255,255,255,0.45);border-radius:3px;pointer-events:none}
-.mini-sz-dot{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:#e05a5a;box-shadow:0 0 0 2px rgba(0,0,0,.5);pointer-events:none}
-.mini-sz-dot.inzone{background:#4f9dff}
+.mini-sz-dot{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:#3fb950;box-shadow:0 0 0 2px rgba(0,0,0,.5);pointer-events:none}
+.mini-sz-dot.inzone{background:#e04646}
 .field-sect{margin:4px 0 8px}
 .field-popup .fp-bb,.field-popup .fp-cq{grid-template-columns:repeat(4,1fr)}
 .field-popup .fp-bto{grid-template-columns:repeat(5,1fr)}
