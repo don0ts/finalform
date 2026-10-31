@@ -47,7 +47,7 @@
   stroke:rgba(0,0,0,.4);stroke-width:2px;pointer-events:none}
 
 .heat-wrap{display:flex;justify-content:center;position:relative}
-.heat-wrap canvas{width:100%;max-width:300px;height:auto;border-radius:12px;border:1px solid #232d3b;cursor:crosshair}
+.heat-wrap canvas{width:100%;max-width:260px;height:auto;border-radius:12px;border:1px solid #232d3b;cursor:crosshair}
 .heat-tip{position:absolute;display:none;z-index:30;pointer-events:none;background:rgba(8,16,26,.96);
   border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:6px 9px;font-size:12px;line-height:1.35;
   color:#eaf6ff;box-shadow:0 10px 26px rgba(0,0,0,.5);white-space:nowrap}
