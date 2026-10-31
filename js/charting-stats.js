@@ -170,19 +170,21 @@ function computePitcherRow(evs){
   const thrown=evs.length;
   const grouped=evs.filter(e=> e.pitch_group);
   const gN=grouped.length;
-  const fb=grouped.filter(e=>e.pitch_group==='FB').length;
-  const bbU=grouped.filter(e=>e.pitch_group==='BB').length;
-  const os=grouped.filter(e=>e.pitch_group==='OS').length;
+  const byG=g=> evs.filter(e=> e.pitch_group===g);
+  const fb=byG('FB'), bb=byG('BB'), os=byG('OS');
   const inzoneN=evs.filter(e=>e.inzone).length;
-  const fbZ=grouped.filter(e=>e.pitch_group==='FB'&&e.inzone).length;
-  const bbZ=grouped.filter(e=>e.pitch_group==='BB'&&e.inzone).length;
-  const osZ=grouped.filter(e=>e.pitch_group==='OS'&&e.inzone).length;
-  const ooz=evs.filter(e=>!e.inzone);
-  const oozSw=ooz.filter(evSwing).length;
-  const swings=evs.filter(evSwing).length;
-  const whiff=evs.filter(e=>e.swing==='Whiff').length;
-  const izSw=evs.filter(e=>e.inzone&&evSwing(e));
-  const izWhiff=izSw.filter(e=>e.swing==='Whiff').length;
+  // usage = share of grouped pitches
+  const usage=arr=> fmtPct(arr.length, gN);
+  // zone% = in-zone pitches / pitches thrown (of that group)
+  const zoneAll=fmtPct(inzoneN, thrown);
+  const zoneG=arr=> fmtPct(arr.filter(e=>e.inzone).length, arr.length);
+  // chase% = swings on out-of-zone pitches / out-of-zone pitches thrown
+  const chase=arr=>{ const ooz=arr.filter(e=>!e.inzone); return fmtPct(ooz.filter(evSwing).length, ooz.length); };
+  // whiff% = whiffs / pitches swung at
+  const whiff=arr=>{ const sw=arr.filter(evSwing); return fmtPct(sw.filter(e=>e.swing==='Whiff').length, sw.length); };
+  // iz whiff% = in-zone whiffs / in-zone pitches swung at
+  const izw=arr=>{ const izsw=arr.filter(e=>e.inzone&&evSwing(e)); return fmtPct(izsw.filter(e=>e.swing==='Whiff').length, izsw.length); };
+  // trends = K / BB / HR share of plays (plate appearances)
   const pa=evs.filter(e=> e.pa_outcome || (Array.isArray(e.result)&&e.result.length));
   const paN=pa.length;
   const hasRes=(e,f)=> Array.isArray(e.result)&&e.result.indexOf(f)>=0;
@@ -190,9 +192,11 @@ function computePitcherRow(evs){
   const bbOut=pa.filter(e=> hasRes(e,'BB')||hasRes(e,'iBB')||e.pa_outcome==='BB'||e.pa_outcome==='iBB').length;
   const hr=pa.filter(e=>e.pa_outcome==='HR').length;
   return { events:thrown,
-    fb:fmtPct(fb,gN), bb:fmtPct(bbU,gN), os:fmtPct(os,gN),
-    zone:fmtPct(inzoneN,thrown), fbz:fmtPct(fbZ,fb), bbz:fmtPct(bbZ,bbU), osz:fmtPct(osZ,os),
-    chase:fmtPct(oozSw,ooz.length), whiff:fmtPct(whiff,swings), izwhiff:fmtPct(izWhiff,izSw.length),
+    u_fb:usage(fb), u_bb:usage(bb), u_os:usage(os),
+    z_all:zoneAll, z_fb:zoneG(fb), z_bb:zoneG(bb), z_os:zoneG(os),
+    c_all:chase(evs), c_fb:chase(fb), c_bb:chase(bb), c_os:chase(os),
+    w_all:whiff(evs), w_fb:whiff(fb), w_bb:whiff(bb), w_os:whiff(os),
+    iz_all:izw(evs), iz_fb:izw(fb), iz_bb:izw(bb), iz_os:izw(os),
     k:fmtPct(k,paN), bbp:fmtPct(bbOut,paN), hr:fmtPct(hr,paN) };
 }
 function pheadHtml(){
@@ -200,12 +204,16 @@ function pheadHtml(){
     +'<tr class="grp"><th class="left" colspan="3"></th>'
     +'<th class="grp-usage" colspan="3">Pitch Usage</th>'
     +'<th class="grp-zone" colspan="4">Strike-Zone%</th>'
-    +'<th class="grp-sm" colspan="3">Swing / Miss</th>'
+    +'<th class="grp-chase" colspan="4">Chase%</th>'
+    +'<th class="grp-whiff" colspan="4">Whiff%</th>'
+    +'<th class="grp-izw" colspan="4">IZ Whiff%</th>'
     +'<th class="grp-pa" colspan="3">Trends</th></tr>'
     +'<tr><th></th><th class="left">Season / Date</th><th>Pitches</th>'
     +'<th>FB%</th><th>BB%</th><th>OS%</th>'
     +'<th>Zone%</th><th>FB Zone%</th><th>BB Zone%</th><th>OS Zone%</th>'
-    +'<th>Chase%</th><th>Whiff%</th><th>IZ Whiff%</th>'
+    +'<th>Overall</th><th>Fastball</th><th>Breaking Ball</th><th>Offspeed</th>'
+    +'<th>Overall</th><th>Fastball</th><th>Breaking Ball</th><th>Offspeed</th>'
+    +'<th>Overall</th><th>Fastball</th><th>Breaking Ball</th><th>Offspeed</th>'
     +'<th>K%</th><th>BB%</th><th>HR%</th></tr></thead>';
 }
 function prowHtml(id,label,r,cls){
@@ -213,9 +221,11 @@ function prowHtml(id,label,r,cls){
     +'<td><button class="arrow-btn" data-toggle="'+id+'" aria-label="expand">\u25B6</button></td>'
     +'<td class="left">'+esc(label)+'</td>'
     +'<td>'+r.events+'</td>'
-    +'<td>'+r.fb+'</td><td>'+r.bb+'</td><td>'+r.os+'</td>'
-    +'<td>'+r.zone+'</td><td>'+r.fbz+'</td><td>'+r.bbz+'</td><td>'+r.osz+'</td>'
-    +'<td>'+r.chase+'</td><td>'+r.whiff+'</td><td>'+r.izwhiff+'</td>'
+    +'<td>'+r.u_fb+'</td><td>'+r.u_bb+'</td><td>'+r.u_os+'</td>'
+    +'<td>'+r.z_all+'</td><td>'+r.z_fb+'</td><td>'+r.z_bb+'</td><td>'+r.z_os+'</td>'
+    +'<td>'+r.c_all+'</td><td>'+r.c_fb+'</td><td>'+r.c_bb+'</td><td>'+r.c_os+'</td>'
+    +'<td>'+r.w_all+'</td><td>'+r.w_fb+'</td><td>'+r.w_bb+'</td><td>'+r.w_os+'</td>'
+    +'<td>'+r.iz_all+'</td><td>'+r.iz_fb+'</td><td>'+r.iz_bb+'</td><td>'+r.iz_os+'</td>'
     +'<td>'+r.k+'</td><td>'+r.bbp+'</td><td>'+r.hr+'</td></tr>';
 }
 function pdetailHtml(id,evs){
@@ -232,7 +242,7 @@ function pdetailHtml(id,evs){
       +'<td>'+(e.pa_outcome||(Array.isArray(e.result)&&e.result.length?esc(e.result.join('/')):'')||'<span class="dim">--</span>')+'</td></tr>';
   });
   t+='</tbody></table>';
-  return '<tr class="detail" id="det_'+id+'" style="display:none"><td colspan="16"><div class="detail-wrap">'+t+'</div></td></tr>';
+  return '<tr class="detail" id="det_'+id+'" style="display:none"><td colspan="25"><div class="detail-wrap">'+t+'</div></td></tr>';
 }
 let pfilterText='';
 function renderPitcherStats(){

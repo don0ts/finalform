@@ -294,15 +294,14 @@ if(spv) spv.addEventListener('change', ()=>{ sprayVs=spv.value; renderSpray(); }
 
 /* ================= Pitcher Visualization tab ================= */
 let pvizMode='result', pvizPlayer='', pvizVs='';
-const PTYPE_COLOR={FB:'#8fc2ff',BB:'#9b6bd6',OS:'#f0a44e'};
+const PTYPE_COLOR={FB:'#e11919',BB:'#f0c828',OS:'#4ade80'};
 const PRES_COLOR={Whiff:'#e11919',CalledStrike:'#f28b8b',Ball:'#4ade80',Foul:'#f0c828',Other:'#8a93a0'};
 function pitchResult(e){
   if(e.swing==='Whiff') return 'Whiff';
-  if(INPLAY_LOC.indexOf(e.pa_outcome)>=0) return 'InPlay';
-  const bs=(e.ball_strike||'').toString().toLowerCase();
-  if(bs.indexOf('foul')>=0) return 'Foul';
-  if(bs.indexOf('ball')>=0) return 'Ball';
-  if(bs.indexOf('call')>=0||bs.indexOf('strike')>=0) return 'CalledStrike';
+  if(e.swing==='Foul') return 'Foul';
+  if(e.swing==='InPlay') return 'InPlay';
+  if(e.ball_strike==='Ball') return 'Ball';
+  if(e.ball_strike==='Strike') return 'CalledStrike';
   return 'Other';
 }
 function pvizColor(e){
@@ -310,6 +309,28 @@ function pvizColor(e){
   const r=pitchResult(e);
   if(r==='InPlay'){ const c=resultCat(e.pa_outcome); return c?c.color:'#8a93a0'; }
   return PRES_COLOR[r]||'#8a93a0';
+}
+function pvizResultLabel(e){
+  const r=pitchResult(e);
+  if(r==='InPlay'){ const c=resultCat(e.pa_outcome); return c?c.label:(e.pa_outcome||'In Play'); }
+  return ({Whiff:'Whiff',CalledStrike:'Called Strike',Ball:'Ball',Foul:'Foul'})[r]||'\u2014';
+}
+function pvizHover(e){
+  const parts=[];
+  const pg=e.pitch_group||'';
+  if(pg && e.velo!=null && e.velo!=='') parts.push(pg+' '+e.velo);
+  else if(pg) parts.push(pg);
+  else if(e.velo!=null && e.velo!=='') parts.push(String(e.velo));
+  parts.push(pvizResultLabel(e));
+  if(e.batted_ball) parts.push(BB_HOVER[e.batted_ball]||e.batted_ball);
+  if(e.contact_quality) parts.push(e.contact_quality);
+  let s=parts.filter(Boolean).join(' \u00b7 ');
+  if(e.swing==='InPlay'){
+    const pos=e.batted_to!=null&&e.batted_to!==''?String(e.batted_to):(e.pa_outcome==='HR'?'8':'');
+    const noun=FIELDER_NOUN[pos]; if(noun) s+=' -- To '+noun;
+  }
+  if(e.player) s+=' (vs '+e.player+')';
+  return s;
 }
 function buildPvizZone(evs){
   const W=300,H=360;
@@ -324,9 +345,9 @@ function buildPvizZone(evs){
   }
   pts.forEach(e=>{
     const cx=e.pitch_x/100*W, cy=e.pitch_y/100*H;
-    const ttl=esc(playInfoText(e));
+    const ttl=esc(pvizHover(e));
     svg+='<circle cx="'+ff(cx)+'" cy="'+ff(cy)+'" r="6.5" fill="'+pvizColor(e)+'" stroke="rgba(0,0,0,0.5)" stroke-width="1" class="fs-dot"><title>'+ttl+'</title></circle>';
-    if(pvizMode==='result' && e.swing==='Whiff'){
+    if(e.swing==='Whiff'){
       svg+='<path d="M'+ff(cx-3)+','+ff(cy-3)+' L'+ff(cx+3)+','+ff(cy+3)+' M'+ff(cx+3)+','+ff(cy-3)+' L'+ff(cx-3)+','+ff(cy+3)+'" stroke="#fff" stroke-width="1.7" stroke-linecap="round" pointer-events="none"/>';
     }
   });
@@ -341,8 +362,11 @@ function buildPvizLegend(evs){
       rows+='<div class="lg-item"><span class="lg-sw" style="background:'+PTYPE_COLOR[d[0]]+'"></span><span class="lg-lbl">'+d[1]+'</span><span class="lg-val">'+n+' \u00b7 '+pct+'</span></div>';
     });
   } else {
-    [['Whiff','Whiff','#e11919'],['CalledStrike','Called Strike','#f28b8b'],['Ball','Ball','#4ade80'],['Foul','Foul','#f0c828'],['InPlay','In Play','#8fc2ff']].forEach(function(d){
-      const n= d[0]==='InPlay'? evs.filter(e=>INPLAY_LOC.indexOf(e.pa_outcome)>=0).length : evs.filter(e=>pitchResult(e)===d[0]).length;
+    [['Whiff','Whiff','#e11919'],['CalledStrike','Called Strike','#f28b8b'],['Ball','Ball','#4ade80'],['Foul','Foul','#f0c828'],['out','Out / E / FC / DP / SAC / SACF','#2bb5a0'],['1B','Single','#8fc2ff'],['2B','Double','#9b6bd6'],['3B','Triple','#f0a44e'],['HR','Home Run','#7b2d43']].forEach(function(d){
+      let n;
+      if(d[0]==='out') n=evs.filter(e=>e.swing==='InPlay' && RESULT_CATS[0].set.indexOf(e.pa_outcome)>=0).length;
+      else if(d[0]==='1B'||d[0]==='2B'||d[0]==='3B'||d[0]==='HR') n=evs.filter(e=>e.swing==='InPlay' && e.pa_outcome===d[0]).length;
+      else n=evs.filter(e=>pitchResult(e)===d[0]).length;
       const pct= total?((n/total*100).toFixed(1)+'%'):'0%';
       rows+='<div class="lg-item"><span class="lg-sw" style="background:'+d[2]+'"></span><span class="lg-lbl">'+d[1]+'</span><span class="lg-val">'+n+' \u00b7 '+pct+'</span></div>';
     });
