@@ -4,6 +4,13 @@ const FLOAT_KEY = 'pitch_recorder_compact_float_v1';
 const $ = id => document.getElementById(id);
 function uid(prefix){ return (prefix||'id') + '_' + Math.random().toString(36).slice(2,9); }
 
+// Reflect DB connection status in the header pill (mirrors the data-entry page).
+function setConnState(state, label){
+  var el=document.getElementById('connState'); if(!el) return;
+  el.textContent=label;
+  el.setAttribute('data-state', state);
+}
+
 /* ===================== Firebase (player search) ===================== */
 const firebaseConfig = {
   apiKey: "AIzaSyDzxseQexlbv0onZH2l5PHNDa5ZKFv5Kz8",
@@ -322,7 +329,6 @@ let floatState = { left:null, top:null, size:96 };
 const sessionSelect = $('session-select');
 const createSessionBtn = $('create-session-btn');
 const clearLogBtn = $('clear-log-btn');
-const clearAllDataBtn = $('clear-all-data-btn');
 const logSearchInput = $('log-search');
 const logSearchClear = $('log-search-clear');
 const lockFloatsCheckbox = $('lock-floats');
@@ -389,6 +395,8 @@ const DEF_ROLE = { outfielders:'OF', infielders:'IF', catchers:'C' };
 const CHARTING_COLLECTION = 'ChartingSessions';
 let _syncTimer = null;
 const _syncedCache = {};          // session id -> JSON of last successfully-queued write
+const _localEditTs = {};          // session id -> last time THIS device changed it (push)
+const _cloudMeta = {};            // session id -> last _updatedAt seen from the cloud
 let _knownSessionIds = new Set(); // session ids this page has written, for deletion sync
 function _cloudSafe(obj){ try { return JSON.parse(JSON.stringify(obj)); } catch(e){ return null; } }
 function syncSessionsToDb(){
@@ -401,6 +409,7 @@ function syncSessionsToDb(){
       const json = JSON.stringify(sess);
       if (_syncedCache[sess.id] === json) return;   // unchanged since last write
       _syncedCache[sess.id] = json;
+      _localEditTs[sess.id] = Date.now();            // genuine local change on this device
       const payload = _cloudSafe(Object.assign({}, sess, { _updatedAt: Date.now() }));
       if (!payload) return;
       _db.collection(CHARTING_COLLECTION).doc(String(sess.id)).set(payload)
@@ -421,6 +430,81 @@ function scheduleSync(){ if (_syncTimer) clearTimeout(_syncTimer); _syncTimer = 
 
 function saveAll(){ try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); localStorage.setItem(FLOAT_KEY, JSON.stringify(floatState)); } catch(e){ console.warn('save failed', e); } scheduleSync(); }
 function loadAll(){ try { const r = localStorage.getItem(STORAGE_KEY); if (r) state = Object.assign(state, JSON.parse(r) || {}); const fr = localStorage.getItem(FLOAT_KEY); if (fr) floatState = Object.assign(floatState, JSON.parse(fr) || {}); if (!Array.isArray(state.sessions)) state.sessions = []; if (!state.currentSide) state.currentSide = 'top'; if (!state.activeTab) state.activeTab = 'game'; if (!state.workoutSection) state.workoutSection = 'dash'; } catch(e){ console.warn('load failed', e); } }
+
+/* ---- Load charting sessions FROM the cloud (collection "ChartingSessions") ----
+   The recorder now reads the cloud, so a session charted on one device shows up
+   on another. Inbound snapshots are merged by id: newer cloud copies replace the
+   local copy (last-write-wins by _updatedAt), brand-new cloud sessions are added,
+   and sessions deleted in the cloud are removed locally. A session this device
+   just edited is protected for a short window so inbound echoes can't clobber an
+   in-progress edit. The first snapshot also decides whether a default event is
+   needed (only when the cloud is genuinely empty). */
+let _chartingListening = false;
+let _firstChartingSnap = false;
+function _stripSessMeta(o){ const c = Object.assign({}, o); delete c._updatedAt; return c; }
+function ensureDefaultSessionIfEmpty(){
+  if (state.sessions && state.sessions.length) return false;
+  const s = buildDefaultSession('Event 1', new Date().toISOString().slice(0,10));
+  state.sessions = [s]; state.currentSessionId = s.id; saveAll();
+  return true;
+}
+function startChartingSessionsListener(){
+  if (!_db || _chartingListening) return;
+  _chartingListening = true;
+  try {
+    _db.collection(CHARTING_COLLECTION).onSnapshot(function(snap){
+      setConnState('connected','Connected');
+      let changed = false;
+      const cloudIds = new Set();
+      snap.forEach(function(doc){
+        const data = doc.data(); if (!data) return;
+        const id = (data.id!=null ? data.id : doc.id);
+        cloudIds.add(String(id));
+        const cloudTs = Number(data._updatedAt) || 0;
+        _cloudMeta[String(id)] = cloudTs;
+        const incoming = _stripSessMeta(data);
+        const incomingJson = JSON.stringify(incoming);
+        if (_syncedCache[id] === incomingJson) return;            // our own echo
+        const i = state.sessions.findIndex(function(s){ return String(s.id)===String(id); });
+        if (i < 0){
+          state.sessions.push(incoming); _syncedCache[id] = incomingJson; changed = true;
+        } else {
+          const localTs = _localEditTs[String(id)] || 0;
+          if (cloudTs > localTs + 500){                           // cloud is newer than our last edit
+            state.sessions[i] = incoming; _syncedCache[id] = incomingJson; changed = true;
+          }
+        }
+      });
+      // Sessions deleted in the cloud (and not just edited here) are dropped locally.
+      Object.keys(_cloudMeta).forEach(function(id){
+        if (!cloudIds.has(String(id))){
+          delete _cloudMeta[id];
+          const i = state.sessions.findIndex(function(s){ return String(s.id)===String(id); });
+          if (i >= 0 && (_localEditTs[id]||0) < Date.now()-1000){
+            state.sessions.splice(i,1); delete _syncedCache[id]; changed = true;
+          }
+        }
+      });
+      if (!_firstChartingSnap){
+        _firstChartingSnap = true;
+        if (ensureDefaultSessionIfEmpty()) changed = true;         // cloud empty -> start fresh
+      }
+      if (changed){
+        if (!getCurrentSession() && state.sessions.length) state.currentSessionId = state.sessions[0].id;
+        state.sessions.forEach(function(s){ ensureSessionClock(s); ensureSessionCounters(s); ensureWorkout(s); });
+        saveAll(); renderAll();
+      }
+    }, function(err){
+      console.warn('ChartingSessions listen failed', err);
+      setConnState('offline','Disconnected');
+      if (!_firstChartingSnap){ _firstChartingSnap = true; if (ensureDefaultSessionIfEmpty()) renderAll(); }
+    });
+  } catch(err){
+    console.warn('ChartingSessions listener setup failed', err);
+    setConnState('offline','Offline');
+    if (!_firstChartingSnap){ _firstChartingSnap = true; if (ensureDefaultSessionIfEmpty()) renderAll(); }
+  }
+}
 
 /* Sessions / model */
 function buildDefaultSession(name, date){
@@ -1285,28 +1369,6 @@ function addBPPlayer(raw){
 /* ===== clear log (game only) ===== */
 async function clearLog(){ const sess=getCurrentSession(); if(!sess) return; const ok=await showModal({title:'Clear Log',message:'Clear all Game entries for this event?',buttons:[{label:'Clear',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if(!ok) return; sess.events=[]; sess.nextId=1; sess.nextContactId=1; sess.nextPlayId=1; selState.idx=null; selState.whole=false; saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); }
 
-/* ===== clear ALL charting data (local + cloud) ===== */
-async function clearAllData(){
-  const ok=await showModal({ title:'Clear All Data', message:'This permanently deletes ALL charting events, sessions and workout logs on this device AND in the cloud database (ChartingSessions). This cannot be undone. Continue?', buttons:[{label:'Delete Everything',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]});
-  if(!ok) return;
-  if (_syncTimer){ clearTimeout(_syncTimer); _syncTimer=null; }
-  if (_db){
-    try{
-      const snap=await _db.collection(CHARTING_COLLECTION).get();
-      const dels=[]; snap.forEach(doc=>{ dels.push(doc.ref.delete().catch(e=>console.warn('ChartingSessions delete failed', doc.id, e))); });
-      await Promise.all(dels);
-    }catch(e){ console.warn('cloud wipe failed', e); showToast('Local data cleared; cloud wipe failed (check connection/rules)'); }
-  }
-  try{ localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(FLOAT_KEY); }catch(e){}
-  Object.keys(_syncedCache).forEach(k=>delete _syncedCache[k]);
-  _knownSessionIds=new Set();
-  state={ sessions:[], currentSessionId:null, currentSide:'top', compactNames:false, activeTab:'game', workoutSection:'defense' };
-  floatState={ left:null, top:null, size:96 };
-  selState.idx=null; selState.whole=false;
-  renderAll();
-  showToast('All charting data cleared');
-}
-
 /* ===== copy / paste player lists ===== */
 function copyTextToClipboard(text){
   try { if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text); } catch(e){}
@@ -1546,7 +1608,6 @@ createSessionBtn.addEventListener('click', async ()=>{
   const s=buildDefaultSession(nm, dt); state.sessions.push(s); state.currentSessionId=s.id; saveAll(); renderAll();
 });
 clearLogBtn.addEventListener('click', clearLog);
-if (clearAllDataBtn) clearAllDataBtn.addEventListener('click', clearAllData);
 /* Lock Floating Buttons: when checked, floating buttons can't be dragged or resized
    (prevents accidentally moving them instead of tapping on touch devices). */
 if (lockFloatsCheckbox){
@@ -2321,8 +2382,12 @@ if (amAddHitterInput){
 
 function init(){
   loadAll();
-  if (!state.sessions || state.sessions.length===0){ const s=buildDefaultSession('Event 1', new Date().toISOString().slice(0,10)); state.sessions=[s]; state.currentSessionId=s.id; saveAll(); }
-  if (!state.currentSessionId) state.currentSessionId=state.sessions[0].id;
+  // When the DB is reachable, defer the "create a default event" decision to the
+  // first cloud snapshot so we never create a junk empty event while the cloud
+  // still has real sessions to load. Offline, fall back to a local default.
+  if (_db){ setConnState('connecting','Connecting\u2026'); startChartingSessionsListener(); }
+  else { setConnState('offline','Offline'); ensureDefaultSessionIfEmpty(); }
+  if (state.currentSessionId==null && state.sessions.length) state.currentSessionId=state.sessions[0].id;
   state.sessions.forEach(s=>{ ensureSessionClock(s); ensureSessionCounters(s); ensureWorkout(s); });
   state.compactNames = window.innerWidth < 420;
   window.addEventListener('resize', ()=>{ const compact=window.innerWidth<420; if (compact!==state.compactNames){ state.compactNames=compact; renderPlayerLists(); renderDefenseLists(); renderBPList(); }});

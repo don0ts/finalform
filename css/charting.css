@@ -502,3 +502,10 @@ select option, select optgroup{background:#0b1724;color:#eaf6ff}
 .hkh-row{display:flex;align-items:center;gap:10px;font-size:13px;color:#eaf6ff}
 .hkh-key{display:inline-block;min-width:54px;text-align:center;padding:2px 6px;border:1px solid var(--soft-border);border-radius:5px;background:#0c1826;font-weight:800;font-size:12px}
 .hkh-desc{color:#cdd9e6}
+
+/* DB connection status pill (mirrors the main data-entry page) */
+.connstate{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid var(--soft-border);color:var(--muted);white-space:nowrap}
+.connstate::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
+.connstate[data-state="connected"]{color:#34d399;border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.08)}
+.connstate[data-state="connecting"]{color:#fbbf24;border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.08)}
+.connstate[data-state="offline"]{color:#f87171;border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
