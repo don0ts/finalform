@@ -29,11 +29,11 @@ SECT_BY_NUM['1']={pos:'P',num:'1',d1:-12,d2:12,rIn:66,rOut:126};
 SECT_BY_NUM['2']={pos:'C',num:'2',d1:-45,d2:45,rIn:0,rOut:58};
 
 const RESULT_CATS=[
-  {key:'out',label:'Out / E',color:'#f28b8b',set:['OUT','E','FC','DP','SAC','SACF']},
-  {key:'1B',label:'Single',color:'#8fc2ff',set:['1B']},
-  {key:'2B',label:'Double',color:'#5ec877',set:['2B']},
-  {key:'3B',label:'Triple',color:'#f0a44e',set:['3B']},
-  {key:'HR',label:'Home Run',color:'#7b2d43',set:['HR']}
+  {key:'out',label:'Out / E',color:'#2bb5a0',set:['OUT','E','FC','DP','SAC','SACF'],desc:'Outs, errors, fielder\u2019s choice, double plays & sacrifices'},
+  {key:'1B',label:'Single',color:'#8fc2ff',set:['1B'],desc:'Base hit \u2014 reached first base'},
+  {key:'2B',label:'Double',color:'#9b6bd6',set:['2B'],desc:'Extra-base hit \u2014 reached second base'},
+  {key:'3B',label:'Triple',color:'#f0a44e',set:['3B'],desc:'Extra-base hit \u2014 reached third base'},
+  {key:'HR',label:'Home Run',color:'#7b2d43',set:['HR'],desc:'Ball cleared the fence'}
 ];
 const TRAJ_CATS=[
   {key:'GB',label:'Groundball',color:'#b5793c'},
@@ -55,6 +55,23 @@ function resultCat(pa){ return RESULT_CATS.find(c=> c.set.indexOf(pa)>=0) || nul
 function catColor(b){
   if(sprayMode==='result'){ const c=resultCat(b.pa); return c?c.color:'#888'; }
   const c=TRAJ_CATS.find(c=> c.key===b.bb); return c?c.color:'#8a93a0';
+}
+const FIELDER_NOUN={'1':'Pitcher','2':'Catcher','3':'First Baseman','4':'Second Baseman','5':'Third Baseman','6':'Shortstop','7':'Left Fielder','8':'Center Fielder','9':'Right Fielder'};
+const BB_HOVER={GB:'Ground Ball',LD:'Line Drive',FB:'Fly Ball',PU:'Pop Up'};
+function playInfoText(e){
+  const parts=[];
+  const pg=e.pitch_group||'';
+  if(pg && e.velo!=null && e.velo!=='') parts.push(pg+' '+e.velo);
+  else if(pg) parts.push(pg);
+  else if(e.velo!=null && e.velo!=='') parts.push(String(e.velo));
+  const rc=resultCat(e.pa_outcome); parts.push(rc?rc.label:(e.pa_outcome||''));
+  if(e.batted_ball) parts.push(BB_HOVER[e.batted_ball]||e.batted_ball);
+  if(e.contact_quality) parts.push(e.contact_quality);
+  let s=parts.filter(Boolean).join(' \u00b7 ');
+  const pos = e.batted_to!=null&&e.batted_to!=='' ? String(e.batted_to) : (e.pa_outcome==='HR'?'8':'');
+  const noun=FIELDER_NOUN[pos];
+  if(noun) s+=' -- To '+noun;
+  return s;
 }
 
 function posFullName(num){
@@ -108,8 +125,7 @@ function buildSprayField(balls){
       const rad=ring? (10+ring*9):(i? 9:0);
       cx=c.x+Math.cos(ang)*rad; cy=c.y+Math.sin(ang)*rad;
     }
-    const rlbl = sprayMode==='result' ? (resultCat(b.pa)? resultCat(b.pa).label : b.pa) : ((TRAJ_CATS.find(c=>c.key===b.bb)||{}).label || 'Unspecified');
-    const ttl = esc(rlbl+' \u2014 to '+(posFullName(b.pos)||('pos '+b.pos)));
+    const ttl = esc(playInfoText(b.e));
     svg+='<circle class="fs-dot" cx="'+ff(cx)+'" cy="'+ff(cy)+'" r="6" fill="'+catColor(b)+'" stroke="rgba(0,0,0,0.5)" stroke-width="1"><title>'+ttl+'</title></circle>';
   });
   FSECTIONS.concat([SECT_BY_NUM['1'],SECT_BY_NUM['2']]).forEach(s=>{
@@ -131,8 +147,9 @@ function buildSprayLegend(balls){
     if(sprayMode==='result') n=balls.filter(b=> c.set.indexOf(b.pa)>=0).length;
     else n=balls.filter(b=> b.bb===c.key).length;
     const pct= total? ((n/total*100).toFixed(1)+'%') : '0%';
+    const desc = c.desc? '<span class="lg-desc">'+esc(c.desc)+'</span>' : '';
     rows+='<div class="lg-item"><span class="lg-sw" style="background:'+c.color+'"></span>'
-      +'<span class="lg-lbl">'+c.label+'</span><span class="lg-val">'+n+' \u00b7 '+pct+'</span></div>';
+      +'<span class="lg-lbl">'+c.label+desc+'</span><span class="lg-val">'+n+' \u00b7 '+pct+'</span></div>';
   });
   if(sprayMode==='traj'){ const unk=balls.filter(b=> TRAJ_CATS.every(c=>c.key!==b.bb)).length; if(unk) rows+='<div class="lg-item"><span class="lg-sw" style="background:#8a93a0"></span><span class="lg-lbl">Unspecified</span><span class="lg-val">'+unk+'</span></div>'; }
   return rows + '<div class="lg-total">'+total+' batted ball'+(total!==1?'s':'')+'</div>';
@@ -209,7 +226,9 @@ function renderSpray(){
     const cv=$('heat-canvas'); if(cv){ let ctx; try{ ctx=cv.getContext('2d'); }catch(e){ ctx=null; } if(ctx){ ctx.clearRect(0,0,cv.width,cv.height); ctx.fillStyle='#07121b'; ctx.fillRect(0,0,cv.width,cv.height); } }
     if(note) note.textContent=''; return;
   }
-  const evs=map[sprayPlayer].all;
+  let evs=map[sprayPlayer].all;
+  populateSprayVs(evs);
+  if(sprayVs) evs=evs.filter(e=> e.pitcher===sprayVs);
   const balls=battedBalls(evs);
   if(note) note.textContent = balls.length+' batted ball'+(balls.length!==1?'s':'');
   field.innerHTML = buildSprayField(balls);
@@ -225,6 +244,8 @@ document.querySelectorAll('.stab').forEach(btn=>{
     document.querySelectorAll('.stab-panel').forEach(p=> p.classList.remove('active'));
     const panel=$('stab-'+which); if(panel) panel.classList.add('active');
     if(which==='spray') renderSpray();
+    else if(which==='pstats'){ if(typeof renderPitcherStats==='function') renderPitcherStats(); }
+    else if(which==='pviz') renderPitcherViz();
   });
 });
 const spm=$('spray-mode');
@@ -259,3 +280,105 @@ function qLabel(q){ if(q<0.34) return 'Weak contact'; if(q<0.67) return 'Average
   });
   cv.addEventListener('mouseleave', ()=>{ if(tip) tip.style.display='none'; });
 })();
+
+/* ================= matchup filter: Spray vs Pitcher ================= */
+let sprayVs='';
+function populateSprayVs(evs){
+  const sel=$('spray-vs'); if(!sel) return;
+  const pitchers=Array.from(new Set(evs.map(e=>e.pitcher).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+  if(sprayVs && pitchers.indexOf(sprayVs)<0) sprayVs='';
+  sel.innerHTML='<option value="">All pitchers</option>'+pitchers.map(p=>'<option value="'+esc(p)+'"'+(p===sprayVs?' selected':'')+'>'+esc(p)+'</option>').join('');
+}
+const spv=$('spray-vs');
+if(spv) spv.addEventListener('change', ()=>{ sprayVs=spv.value; renderSpray(); });
+
+/* ================= Pitcher Visualization tab ================= */
+let pvizMode='result', pvizPlayer='', pvizVs='';
+const PTYPE_COLOR={FB:'#8fc2ff',BB:'#9b6bd6',OS:'#f0a44e'};
+const PRES_COLOR={Whiff:'#e11919',CalledStrike:'#f28b8b',Ball:'#4ade80',Foul:'#f0c828',Other:'#8a93a0'};
+function pitchResult(e){
+  if(e.swing==='Whiff') return 'Whiff';
+  if(INPLAY_LOC.indexOf(e.pa_outcome)>=0) return 'InPlay';
+  const bs=(e.ball_strike||'').toString().toLowerCase();
+  if(bs.indexOf('foul')>=0) return 'Foul';
+  if(bs.indexOf('ball')>=0) return 'Ball';
+  if(bs.indexOf('call')>=0||bs.indexOf('strike')>=0) return 'CalledStrike';
+  return 'Other';
+}
+function pvizColor(e){
+  if(pvizMode==='type') return PTYPE_COLOR[e.pitch_group]||'#8a93a0';
+  const r=pitchResult(e);
+  if(r==='InPlay'){ const c=resultCat(e.pa_outcome); return c?c.color:'#8a93a0'; }
+  return PRES_COLOR[r]||'#8a93a0';
+}
+function buildPvizZone(evs){
+  const W=300,H=360;
+  const pts=evs.filter(e=> e.pitch_x!=null && e.pitch_y!=null);
+  let svg='<svg viewBox="0 0 '+W+' '+H+'" class="pviz-svg" preserveAspectRatio="xMidYMid meet">';
+  svg+='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="#07121b"/>';
+  const zx=0.28*W, zy=0.22*H, zw=0.44*W, zh=0.50*H;
+  svg+='<rect x="'+zx+'" y="'+zy+'" width="'+zw+'" height="'+zh+'" fill="rgba(56,189,248,0.04)" stroke="rgba(230,240,255,0.85)" stroke-width="2"/>';
+  for(let i=1;i<3;i++){
+    svg+='<line x1="'+ff(zx+zw*i/3)+'" y1="'+ff(zy)+'" x2="'+ff(zx+zw*i/3)+'" y2="'+ff(zy+zh)+'" stroke="rgba(230,240,255,0.3)" stroke-width="1"/>';
+    svg+='<line x1="'+ff(zx)+'" y1="'+ff(zy+zh*i/3)+'" x2="'+ff(zx+zw)+'" y2="'+ff(zy+zh*i/3)+'" stroke="rgba(230,240,255,0.3)" stroke-width="1"/>';
+  }
+  pts.forEach(e=>{
+    const cx=e.pitch_x/100*W, cy=e.pitch_y/100*H;
+    const ttl=esc(playInfoText(e));
+    svg+='<circle cx="'+ff(cx)+'" cy="'+ff(cy)+'" r="6.5" fill="'+pvizColor(e)+'" stroke="rgba(0,0,0,0.5)" stroke-width="1" class="fs-dot"><title>'+ttl+'</title></circle>';
+    if(pvizMode==='result' && e.swing==='Whiff'){
+      svg+='<path d="M'+ff(cx-3)+','+ff(cy-3)+' L'+ff(cx+3)+','+ff(cy+3)+' M'+ff(cx+3)+','+ff(cy-3)+' L'+ff(cx-3)+','+ff(cy+3)+'" stroke="#fff" stroke-width="1.7" stroke-linecap="round" pointer-events="none"/>';
+    }
+  });
+  svg+='</svg>';
+  return svg;
+}
+function buildPvizLegend(evs){
+  const total=evs.length; let rows='';
+  if(pvizMode==='type'){
+    [['FB','Fastball'],['BB','Breaking Ball'],['OS','OffSpeed']].forEach(function(d){
+      const n=evs.filter(e=>e.pitch_group===d[0]).length; const pct= total?((n/total*100).toFixed(1)+'%'):'0%';
+      rows+='<div class="lg-item"><span class="lg-sw" style="background:'+PTYPE_COLOR[d[0]]+'"></span><span class="lg-lbl">'+d[1]+'</span><span class="lg-val">'+n+' \u00b7 '+pct+'</span></div>';
+    });
+  } else {
+    [['Whiff','Whiff','#e11919'],['CalledStrike','Called Strike','#f28b8b'],['Ball','Ball','#4ade80'],['Foul','Foul','#f0c828'],['InPlay','In Play','#8fc2ff']].forEach(function(d){
+      const n= d[0]==='InPlay'? evs.filter(e=>INPLAY_LOC.indexOf(e.pa_outcome)>=0).length : evs.filter(e=>pitchResult(e)===d[0]).length;
+      const pct= total?((n/total*100).toFixed(1)+'%'):'0%';
+      rows+='<div class="lg-item"><span class="lg-sw" style="background:'+d[2]+'"></span><span class="lg-lbl">'+d[1]+'</span><span class="lg-val">'+n+' \u00b7 '+pct+'</span></div>';
+    });
+  }
+  return rows+'<div class="lg-total">'+total+' pitch'+(total!==1?'es':'')+'</div>';
+}
+function populatePvizPlayers(map){
+  const sel=$('pviz-player'); if(!sel) return;
+  const names=Object.keys(map).sort((a,b)=>a.localeCompare(b));
+  if(!(pvizPlayer && names.indexOf(pvizPlayer)>=0)) pvizPlayer=names[0]||'';
+  sel.innerHTML= names.length? names.map(n=>'<option value="'+esc(n)+'"'+(n===pvizPlayer?' selected':'')+'>'+esc(n)+'</option>').join('') : '<option value="">No pitchers yet</option>';
+}
+function populatePvizVs(evs){
+  const sel=$('pviz-vs'); if(!sel) return;
+  const hitters=Array.from(new Set(evs.map(e=>e.player).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+  if(pvizVs && hitters.indexOf(pvizVs)<0) pvizVs='';
+  sel.innerHTML='<option value="">All hitters</option>'+hitters.map(h=>'<option value="'+esc(h)+'"'+(h===pvizVs?' selected':'')+'>'+esc(h)+'</option>').join('');
+}
+function renderPitcherViz(){
+  const state=loadState(); const map= (typeof gatherPitchers==='function')? gatherPitchers(state) : {};
+  populatePvizPlayers(map);
+  const zone=$('pviz-zone'), note=$('pviz-note');
+  if(!pvizPlayer || !map[pvizPlayer]){
+    if(zone) zone.innerHTML='<div class="status">No pitches logged yet. Log pitches on the strike zone, then come back here.</div>';
+    if($('pviz-legend')) $('pviz-legend').innerHTML=''; if(note) note.textContent='';
+    const vs=$('pviz-vs'); if(vs) vs.innerHTML='<option value="">All hitters</option>';
+    return;
+  }
+  let evs=map[pvizPlayer].all;
+  populatePvizVs(evs);
+  if(pvizVs) evs=evs.filter(e=> e.player===pvizVs);
+  if(note) note.textContent= evs.length+' pitch'+(evs.length!==1?'es':'')+(pvizVs?(' vs '+pvizVs):'');
+  if(zone) zone.innerHTML=buildPvizZone(evs);
+  if($('pviz-legend')) $('pviz-legend').innerHTML=buildPvizLegend(evs);
+}
+const pvm=$('pviz-mode');
+if(pvm) pvm.querySelectorAll('button').forEach(b=> b.addEventListener('click', ()=>{ pvizMode=b.getAttribute('data-mode'); pvm.querySelectorAll('button').forEach(x=> x.classList.toggle('active', x===b)); renderPitcherViz(); }));
+const pvp=$('pviz-player'); if(pvp) pvp.addEventListener('change', ()=>{ pvizPlayer=pvp.value; pvizVs=''; renderPitcherViz(); });
+const pvv=$('pviz-vs'); if(pvv) pvv.addEventListener('change', ()=>{ pvizVs=pvv.value; renderPitcherViz(); });

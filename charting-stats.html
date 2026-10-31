@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Hitter Stats</title>
+<title>Charting Stats</title>
 <link rel="stylesheet" href="css/charting-stats.css" />
 <link rel="stylesheet" href="css/charting-stats-spray.css" />
 </head>
 <body>
 <header>
-  <h1>HITTER STATS</h1>
+  <h1>CHARTING STATS</h1>
   <span class="sub" id="event-note"></span>
   <div class="spacer"></div>
   <a class="navlink" href="index.html">Home</a>
@@ -22,7 +22,9 @@
 <div class="wrap">
   <div class="stab-bar">
     <button class="stab active" data-stab="stats">Hitter Stats</button>
-    <button class="stab" data-stab="spray">Spray Chart &amp; Heat Maps</button>
+    <button class="stab" data-stab="pstats">Pitcher Stats</button>
+    <button class="stab" data-stab="spray">Hitter Spray Chart &amp; Heatmaps</button>
+    <button class="stab" data-stab="pviz">Pitcher Visualization</button>
   </div>
 
   <div id="stab-stats" class="stab-panel active">
@@ -39,11 +41,29 @@
     <div id="stats-root"></div>
   </div>
 
+  <div id="stab-pstats" class="stab-panel">
+    <div class="toolbar">
+      <div class="search">
+        <span style="color:var(--muted)">🔍</span>
+        <input type="text" id="psearch" placeholder="Search by pitcher name…" autocomplete="off" />
+      </div>
+      <span class="count-note" id="pcount-note"></span>
+      <button class="ghost" id="pexpand-all">Expand All</button>
+      <button class="ghost" id="pcollapse-all">Collapse All</button>
+      <button id="prefresh">Refresh</button>
+    </div>
+    <div id="pstats-root"></div>
+  </div>
+
   <div id="stab-spray" class="stab-panel">
     <div class="spray-controls">
       <div class="search" style="flex:0 0 auto">
         <span style="color:var(--muted)">👤</span>
         <select id="spray-player"></select>
+      </div>
+      <div class="search" style="flex:0 0 auto">
+        <span style="color:var(--muted)">⚾</span>
+        <select id="spray-vs"></select>
       </div>
       <div class="seg" id="spray-mode">
         <button class="active" data-mode="result">Play Result</button>
@@ -61,6 +81,31 @@
         <h3>Strike Zone Heat Map</h3>
         <div class="heat-wrap"><canvas id="heat-canvas" width="300" height="360"></canvas></div>
         <div id="heat-legend" class="viz-legend"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="stab-pviz" class="stab-panel">
+    <div class="spray-controls">
+      <div class="search" style="flex:0 0 auto">
+        <span style="color:var(--muted)">👤</span>
+        <select id="pviz-player"></select>
+      </div>
+      <div class="search" style="flex:0 0 auto">
+        <span style="color:var(--muted)">🏏</span>
+        <select id="pviz-vs"></select>
+      </div>
+      <div class="seg" id="pviz-mode">
+        <button class="active" data-mode="result">Pitch Result</button>
+        <button data-mode="type">Pitch Type</button>
+      </div>
+      <span class="count-note" id="pviz-note"></span>
+    </div>
+    <div class="spray-grid">
+      <div class="viz-card">
+        <h3>Strike Zone</h3>
+        <div id="pviz-zone" class="pviz-zone"></div>
+        <div id="pviz-legend" class="viz-legend"></div>
       </div>
     </div>
   </div>

@@ -449,6 +449,17 @@ select option, select optgroup{background:#0b1724;color:#eaf6ff}
 .segtab{padding:7px 16px;border:1px solid var(--soft-border);border-radius:999px;background:#0b1220;font-size:13px;cursor:pointer;user-select:none;font-weight:600;color:var(--muted)}
 .segtab:hover{border-color:var(--accent);color:#fff}
 .segtab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.ep-root{display:flex;flex-direction:column;gap:10px}
+.ep-head{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}
+.ep-toggle{display:flex;align-items:center;gap:14px}
+.ep-tg{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+.ep-search{width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid var(--soft-border);background:#0b1220;color:#eaf6ff;font-size:14px;margin:0 0 8px}
+.ep-search::placeholder{color:var(--muted)}
+.ep-pick{width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid var(--soft-border);background:#0b1220;color:#eaf6ff;font-size:14px;margin:0 0 12px}
+.ep-pick option{background:#0b1220;color:#eaf6ff}
+.ep-cards{display:flex;flex-direction:column;gap:12px;max-height:50vh;overflow:auto}
+.ep-card{padding:10px;border-radius:10px;background:rgba(255,255,255,0.02);border:1px solid var(--soft-border);display:flex;flex-direction:column;gap:8px}
+.ep-card-title{font-size:14px;font-weight:800;color:#eaf6ff}
 
 /* ===== Redesigned pitch popup (Velo and Pitch Group + Pitch Info) ===== */
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px}

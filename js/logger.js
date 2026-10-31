@@ -591,105 +591,147 @@ async function playerExistsInDb(id){
   try{ const doc=await _db.collection(COLLECTION).doc(String(id)).get(); return !!(doc && doc.exists); }
   catch(e){ return false; }
 }
+let _epMenuMode='legacy';
 async function editPlayersModal(){
-  const sess=getCurrentSession(); if(!sess){ await showModal({title:'Edit Players', message:'Start or select a session first.', buttons:[{label:'OK',value:true}]}); return; }
+  const sess=getCurrentSession(); if(!sess){ await showModal({title:'Edit Players', message:'Start or select a session first.'}); return; }
+  try{ await loadPlayerCache(); }catch(e){}
   const hitters=Array.from(new Set(sess.teams.top.hitters.concat(sess.teams.bot.hitters)));
   const pitchers=Array.from(new Set(sess.teams.top.pitchers.concat(sess.teams.bot.pitchers)));
-  const lineup=Array.from(new Set(pitchers.concat(hitters)));
+  const names=Array.from(new Set(pitchers.concat(hitters)));
   const POSITIONS=['','P','C','1B','2B','3B','SS','IF','LF','CF','RF','OF','DH','UTIL'];
   const CLASSES=['']; for(var _y=2016;_y<=2037;_y++) CLASSES.push(String(_y));
-  const sel=(arr,cur)=>arr.map(o=>'<option value="'+escapeHtml(o)+'"'+(o===cur?' selected':'')+'>'+(o===''?'--':escapeHtml(o))+'</option>').join('');
-  const segRow=(id,label)=>'<div class="ep-seg-row"><span class="ep-seg-lbl">'+label+'</span><div class="segtabs" id="'+id+'"><div class="segtab" data-v="R">R</div><div class="segtab" data-v="L">L</div></div></div>';
-  const dbNote = _db? '' : '<div class="muted-note" style="color:var(--pitch-red)">Database offline — the lineup will update, but no profile is written.</div>';
-  const html='<div style="display:flex;flex-direction:column;gap:8px">'
-    + dbNote
-    + '<label style="font-size:13px;color:var(--muted)">Player</label>'
-    + '<select id="ep-player" style="padding:8px;border-radius:8px;border:1px solid var(--soft-border)">'
-    + '<option value="__new__">+ New Player</option>'
-    + lineup.map(n=>'<option value="'+escapeHtml(n)+'">'+escapeHtml(n)+'</option>').join('')
-    + '</select>'
-    + '<div class="ep-grid">'
-    + '<label>Player Name<input id="ep-name" type="text" /></label>'
-    + '<label>ID (Player ID Cubs)<input id="ep-id" type="text" /></label>'
-    + '<label>Position<select id="ep-pos">'+sel(POSITIONS,'')+'</select></label>'
-    + '<label>Class<select id="ep-class">'+sel(CLASSES,'')+'</select></label>'
-    + '<label>Date of birth<input id="ep-dob" type="date" /></label>'
-    + '</div>'
-    + segRow('ep-bats','Bats')
-    + segRow('ep-throws','Throws')
-    + '<div id="ep-status" class="muted-note" style="font-size:12px"></div>'
-    + '</div>';
-  const p=showModal({ title:'Edit Players', html, buttons:[{label:'Save',value:'save',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
-  const playerSel=$('ep-player');
-  function setSeg(id,val){ const c=$(id); if(!c) return; const v=(val||'').toString().charAt(0).toUpperCase(); c.querySelectorAll('.segtab').forEach(t=> t.classList.toggle('active', t.getAttribute('data-v')===v)); }
-  function getSeg(id){ const c=$(id); if(!c) return ''; const a=c.querySelector('.segtab.active'); return a?a.getAttribute('data-v'):''; }
-  ['ep-bats','ep-throws'].forEach(id=>{ const c=$(id); if(!c) return; c.querySelectorAll('.segtab').forEach(t=> t.addEventListener('click', ()=>{ const on=t.classList.contains('active'); c.querySelectorAll('.segtab').forEach(x=>x.classList.remove('active')); if(!on) t.classList.add('active'); })); });
-  async function fillForm(name){
-    const nameEl=$('ep-name'), idEl=$('ep-id'), posEl=$('ep-pos'), clsEl=$('ep-class'), dobEl=$('ep-dob'), st=$('ep-status');
-    if(name==='__new__'){ nameEl.value=''; idEl.value=''; posEl.value=''; clsEl.value=''; setSeg('ep-bats',''); setSeg('ep-throws',''); dobEl.value=''; st.textContent='Enter a new player profile.'; return; }
-    nameEl.value=name;
-    let id=playerIdFor(sess,name);
-    // Detect the existing DB record even if it was merged/edited: match the
-    // stored id against either the player_id field or the Firestore doc id,
-    // then fall back to a name match. Use the real doc id to load the profile.
-    let hit=null;
+  const sel=(arr,cur)=>arr.map(o=>'<option value="'+escapeHtml(o)+'"'+(String(o)===String(cur||'')?' selected':'')+'>'+(o===''?'--':escapeHtml(o))+'</option>').join('');
+  // Build a working model per lineup player (one card each), resolving the
+  // current id + docId the same way the single editor did.
+  const model=names.map(name=>{
+    let id=playerIdFor(sess,name); let hit=null;
     if(id){ hit=_playerCache.find(pl=> String(pl.id)===String(id) || String(pl.docId)===String(id)); }
     if(!hit){ hit=_playerCache.find(pl=>pl.name && pl.name.toLowerCase()===name.toLowerCase()); }
-    if(hit){ id=hit.id; }
-    const docId=hit ? (hit.docId||hit.id) : id;
-    idEl.value=id||''; posEl.value=''; clsEl.value=''; setSeg('ep-bats',''); setSeg('ep-throws',''); dobEl.value='';
-    if(id && _db){ st.textContent='Loading profile\u2026';
-      try{ const doc=await _db.collection(COLLECTION).doc(String(docId)).get();
+    if(hit) id=hit.id;
+    return { origName:name, name:name, origId:id||'', id:id||'',
+      docId: hit?(hit.docId||hit.id):(id||''),
+      isPitcher: pitchers.includes(name),
+      position:'', cls:'', dob:'', bats:'', throws:'', loaded:false };
+  });
+  // Pull each player's stored profile (parallel) so every card shows its
+  // current values in both Legacy and Dropdown views.
+  if(_db){
+    await Promise.all(model.map(async m=>{
+      if(!m.docId) return;
+      try{ const doc=await _db.collection(COLLECTION).doc(String(m.docId)).get();
         if(doc && doc.exists){ const d=doc.data()||{};
-          posEl.value=d.position||d.pos||''; clsEl.value=d.class||d.year||d.grade||'';
-          setSeg('ep-bats',(d.bats||d.bat||'')); setSeg('ep-throws',(d.throws||d.throw||''));
-          dobEl.value=d.dob||d.birthdate||d.birth_date||''; st.textContent='Loaded from database.';
-        } else { st.textContent='No database profile yet — fill and save to create.'; }
-      }catch(e){ st.textContent='Could not load profile (offline?).'; }
-    } else { st.textContent = _db? 'No ID yet — add one and save to create a profile.' : 'Database offline — lineup update only.'; }
+          m.position=d.position||d.pos||''; m.cls=d.class||d.year||d.grade||'';
+          m.dob=d.dob||d.birthdate||d.birth_date||''; m.bats=(d.bats||d.bat||''); m.throws=(d.throws||d.throw||''); m.loaded=true;
+        }
+      }catch(e){}
+    }));
   }
-  playerSel.addEventListener('change', ()=>fillForm(playerSel.value));
-  fillForm(lineup.length?lineup[0]:'__new__');
-  if(lineup.length) playerSel.value=lineup[0];
+  model.forEach(m=>{ if(!m.position && m.isPitcher) m.position='P'; });
+  const dbNote = _db? '' : '<div class="muted-note" style="color:var(--pitch-red)">Database offline \u2014 the lineup will update, but no profile is written.</div>';
+  const html='<div class="ep-root">'
+    + '<div class="ep-head"><div class="ep-toggle">'
+    +   '<label class="ep-tg"><input type="checkbox" id="ep-mode-legacy"/> Legacy</label>'
+    +   '<label class="ep-tg"><input type="checkbox" id="ep-mode-dropdown"/> Dropdown</label>'
+    + '</div></div>'
+    + dbNote
+    + '<div id="ep-list"></div>'
+    + '</div>';
+  const p=showModal({ title:'Edit Players', html, buttons:[{label:'Save',value:'save',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
+  const listWrap=$('ep-list');
+  const cbLegacy=$('ep-mode-legacy'), cbDrop=$('ep-mode-dropdown');
+  let ddSel=0;
+  function paintToggle(){ cbLegacy.checked=(_epMenuMode==='legacy'); cbDrop.checked=(_epMenuMode==='dropdown'); }
+  function cardHtml(m,i,withTitle){
+    return '<div class="ep-card" data-mi="'+i+'">'
+      + (withTitle?'<div class="ep-card-title">'+escapeHtml(m.name||('Player '+(i+1)))+(m.isPitcher?' \u00b7 P':'')+'</div>':'')
+      + '<div class="ep-grid">'
+      + '<label>Player Name<input type="text" data-f="name" value="'+escapeHtml(m.name)+'"/></label>'
+      + '<label>ID (Player ID Cubs)<input type="text" data-f="id" value="'+escapeHtml(m.id)+'"/></label>'
+      + '<label>Position<select data-f="position">'+sel(POSITIONS,m.position)+'</select></label>'
+      + '<label>Class<select data-f="cls">'+sel(CLASSES,m.cls)+'</select></label>'
+      + '<label>Date of birth<input type="date" data-f="dob" value="'+escapeHtml(m.dob)+'"/></label>'
+      + '</div>'
+      + '<div class="ep-seg-row"><span class="ep-seg-lbl">Bats</span><div class="segtabs" data-seg="bats"><div class="segtab'+(m.bats==="R"?' active':'')+'" data-v="R">R</div><div class="segtab'+(m.bats==="L"?' active':'')+'" data-v="L">L</div></div></div>'
+      + '<div class="ep-seg-row"><span class="ep-seg-lbl">Throws</span><div class="segtabs" data-seg="throws"><div class="segtab'+(m.throws==="R"?' active':'')+'" data-v="R">R</div><div class="segtab'+(m.throws==="L"?' active':'')+'" data-v="L">L</div></div></div>'
+      + '</div>';
+  }
+  function wireCard(cardEl){
+    const mi=+cardEl.getAttribute('data-mi'); const m=model[mi]; if(!m) return;
+    cardEl.querySelectorAll('[data-f]').forEach(el=>{
+      const f=el.getAttribute('data-f');
+      const upd=()=>{ m[f]=el.value; if(f==='name'){ const t=cardEl.querySelector('.ep-card-title'); if(t) t.textContent=(el.value||('Player '+(mi+1)))+(m.isPitcher?' \u00b7 P':''); } };
+      el.addEventListener('input',upd); el.addEventListener('change',upd);
+    });
+    cardEl.querySelectorAll('[data-seg]').forEach(seg=>{
+      const f=seg.getAttribute('data-seg');
+      seg.querySelectorAll('.segtab').forEach(t=> t.addEventListener('click', ()=>{
+        const on=t.classList.contains('active');
+        seg.querySelectorAll('.segtab').forEach(x=>x.classList.remove('active'));
+        if(!on){ t.classList.add('active'); m[f]=t.getAttribute('data-v'); } else { m[f]=''; }
+      }));
+    });
+  }
+  function renderList(){
+    paintToggle();
+    if(!model.length){ listWrap.innerHTML='<div class="muted-note">No players in the lineup yet.</div>'; return; }
+    if(_epMenuMode==='dropdown'){
+      if(ddSel>=model.length) ddSel=0;
+      listWrap.innerHTML='<input type="text" id="ep-search" class="ep-search" placeholder="Search player\u2026" autocomplete="off"/>'
+        + '<select id="ep-pick" class="ep-pick"></select>'
+        + '<div id="ep-holder"></div>';
+      const search=$('ep-search'), pick=$('ep-pick'), holder=$('ep-holder');
+      const labelOf=(m,i)=>(m.name||('Player '+(i+1)))+(m.isPitcher?' \u00b7 P':'');
+      function fillOptions(){
+        const q=(search.value||'').trim().toLowerCase();
+        let matches=model.map((m,i)=>({m,i})).filter(x=> q===''|| (labelOf(x.m,x.i)+' '+x.m.id).toLowerCase().indexOf(q)>=0);
+        if(!matches.length){ pick.innerHTML='<option value="">No matches</option>'; return; }
+        pick.innerHTML=matches.map(x=>'<option value="'+x.i+'">'+escapeHtml(labelOf(x.m,x.i))+'</option>').join('');
+        if(!matches.some(x=>x.i===ddSel)) ddSel=matches[0].i;
+        pick.value=String(ddSel);
+      }
+      function drawOne(){ holder.innerHTML=cardHtml(model[ddSel],ddSel,false); wireCard(holder.firstChild); }
+      search.addEventListener('input', ()=>{ fillOptions(); drawOne(); });
+      pick.addEventListener('change', ()=>{ if(pick.value==='') return; ddSel=+pick.value; drawOne(); });
+      fillOptions(); drawOne();
+    } else {
+      listWrap.innerHTML='<div class="ep-cards">'+model.map((m,i)=>cardHtml(m,i,true)).join('')+'</div>';
+      listWrap.querySelectorAll('.ep-card').forEach(wireCard);
+    }
+  }
+  cbLegacy.addEventListener('change', ()=>{ _epMenuMode='legacy'; renderList(); });
+  cbDrop.addEventListener('change', ()=>{ _epMenuMode='dropdown'; renderList(); });
+  renderList();
   const res=await p;
   if(res!=='save') return;
-  const oldKey=playerSel.value;
-  const newName=$('ep-name').value.trim();
-  const id=$('ep-id').value.trim();
-  if(!newName){ await showModal({title:'Edit Players', message:'Please enter a player name.', buttons:[{label:'OK',value:true}]}); return; }
-  const data={ player_name:newName, position:$('ep-pos').value, class:$('ep-class').value, bats:getSeg('ep-bats'), throws:getSeg('ep-throws'), dob:$('ep-dob').value };
-  if(id) data.player_id=id;
-  let wrote=false;
-  let alreadyInDb=false;
-  if(id && _db){
-    // If this ID already exists in the database, leave that player's
-    // profile completely untouched — only link the ID to the lineup.
-    alreadyInDb=await playerExistsInDb(id);
-    if(!alreadyInDb){ wrote=await writePlayerDoc(id, data); }
+  // Apply every player's edits: merge the profile to the DB, rename across the
+  // lineup + events, and keep the id mapping current. Changing an id moves the
+  // profile (old doc removed) just like the Measurables editor.
+  let dbWrites=0, renamed=0;
+  for(const m of model){
+    const newName=(m.name||'').trim(); if(!newName) continue;
+    const id=(m.id||'').trim();
+    const data={ player_name:newName, position:m.position||'', class:m.cls||'', bats:m.bats||'', throws:m.throws||'', dob:m.dob||'' };
+    if(id) data.player_id=id;
+    if(id && _db){
+      const ok=await writePlayerDoc(id, data); if(ok) dbWrites++;
+      if(m.origId && String(m.origId)!==String(id)){ try{ await _db.collection(COLLECTION).doc(String(m.origId)).delete(); }catch(e){} }
+    }
+    if(newName!==m.origName){
+      renamed++;
+      ['top','bot'].forEach(sd=>{ const t=sess.teams[sd];
+        const ih=t.hitters.indexOf(m.origName); if(ih>=0) t.hitters[ih]=newName;
+        const ip=t.pitchers.indexOf(m.origName); if(ip>=0) t.pitchers[ip]=newName;
+        if(t.selectedPitcher===m.origName) t.selectedPitcher=newName;
+        if(t.selectedHitter===m.origName) t.selectedHitter=newName;
+      });
+      sess.events.forEach(e=>{ if(e.player===m.origName) e.player=newName; if(e.pitcher===m.origName) e.pitcher=newName; });
+      ensurePlayerIds(sess); if(sess.playerIds[m.origName]!=null) delete sess.playerIds[m.origName];
+    }
+    if(id) assignPlayerId(newName, id);
   }
-  // lineup updates
-  if(oldKey==='__new__'){
-    const side=state.currentSide; const isP=($('ep-pos').value==='P');
-    const list=isP?sess.teams[side].pitchers:sess.teams[side].hitters;
-    if(!list.includes(newName)) list.push(newName);
-  } else if(oldKey!==newName){
-    ['top','bot'].forEach(sd=>{ const t=sess.teams[sd];
-      const ih=t.hitters.indexOf(oldKey); if(ih>=0) t.hitters[ih]=newName;
-      const ip=t.pitchers.indexOf(oldKey); if(ip>=0) t.pitchers[ip]=newName;
-      if(t.selectedPitcher===oldKey) t.selectedPitcher=newName;
-      if(t.selectedHitter===oldKey) t.selectedHitter=newName;
-    });
-    sess.events.forEach(e=>{ if(e.player===oldKey) e.player=newName; if(e.pitcher===oldKey) e.pitcher=newName; });
-    ensurePlayerIds(sess); if(sess.playerIds[oldKey]!=null) delete sess.playerIds[oldKey];
-  }
-  if(id) assignPlayerId(newName, id);
   saveAll(); renderAll();
-  let msg;
-  if(!id){ msg='Lineup updated. Add a Player ID to save a database profile.'; }
-  else if(alreadyInDb){ msg='Player ID '+id+' already exists in the database — that profile was kept untouched and only linked to the lineup.'; }
-  else if(wrote){ msg='Saved to database and added to the lineup (ID '+id+').'; }
-  else { msg=_db?'Lineup updated, but the database write failed (try again).':'Lineup updated with ID '+id+' (database offline).'; }
-  await showModal({ title:'Edit Players', message:msg, buttons:[{label:'OK',value:true}] });
+  const msg=_db? (dbWrites+' profile'+(dbWrites!==1?'s':'')+' saved to the database'+(renamed?' \u00b7 '+renamed+' renamed':'')+'.') : 'Lineup updated (database offline).';
+  await showModal({ title:'Edit Players', message:msg });
 }
 
 /* ===== WORKOUT: Defense rendering ===== */
