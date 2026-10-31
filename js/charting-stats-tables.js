@@ -81,21 +81,21 @@ function computeHitterLine(evs){
 /* ---- Pitcher line ---- */
 /* Innings pitched uses baseball notation: each out = 1/3 inning, shown as .1/.2
    (one/two outs) and whole innings as .0 — 1 out = 0.1, 2 = 0.2, 3 = 1.0,
-   4 = 1.1 ... Outs = K, OUT, E, FC, SAC, SACF and DP (no baserunners are
-   charted, so each out-event counts as a single out). */
+   4 = 1.1 ... Outs = K, OUT, E, FC, SAC, SACF and DP; a double play records
+   2 outs. */
 function outsToIP(outs){ const whole=Math.floor(outs/3), rem=outs%3; return whole + rem/10; }
 function computePitcherLine(evs, games){
   const t=tallyOutcomes(evs);
   const h=t.b1+t.b2+t.b3+t.hr;
   const walks=t.bb;
-  const outs = t.so + t.out + t.err + t.fc + t.sac + t.sacf + t.dp;
+  const outs = t.so + t.out + t.err + t.fc + t.sac + t.sacf + t.dp*2;
   const trueIP = outs/3;
   const ab = h + t.so + t.out + t.fc + t.err + t.dp;
   const whip = trueIP? (walks + h)/trueIP : null;
   const baa = ab? h/ab : null;
   const k9 = trueIP? t.so/trueIP*9 : null;
   const bb9 = trueIP? walks/trueIP*9 : null;
-  const kbb = walks? t.so/walks : (t.so>0? Infinity : null);
+  const kbb = walks? t.so/walks : (t.so>0? t.so : null);
   const pitches = evs.length;
   const swings = evs.filter(evSwing).length;
   const whiffs = evs.filter(e=> e.swing==='Whiff').length;
@@ -140,7 +140,7 @@ const PCOLS=[
   {key:'baa',label:'BAA',desc:false,sort:r=>r.baa,fmt:r=>fmtAvg(r.baa)},
   {key:'k9',label:'K/9',desc:true,sort:r=>r.k9,fmt:r=>fmtRate2(r.k9)},
   {key:'bb9',label:'BB/9',desc:false,sort:r=>r.bb9,fmt:r=>fmtRate2(r.bb9)},
-  {key:'kbb',label:'K/BB',desc:true,sort:r=>r.kbb,fmt:r=>fmtRate2(r.kbb)},
+  {key:'kbb',label:'K/BB',desc:true,sort:r=>r.kbb,fmt:r=> r.bb===0 ? (r.so>0? String(r.so) : '--') : fmtRate2(r.kbb)},
   {key:'sw',label:'SW%',desc:true,sort:r=>r.sw,fmt:r=>fmtPctStat(r.sw)},
   {key:'whiff',label:'WHIFF%',desc:true,sort:r=>r.whiff,fmt:r=>fmtPctStat(r.whiff)},
   {key:'bf',label:'BF',desc:true,sort:r=>r.bf,fmt:r=>r.bf}
@@ -190,7 +190,7 @@ function renderHitterBox(){
 }
 
 /* ---- Pitcher Stats tab ---- */
-let pboxState={key:'ip',dir:'desc'};
+let pboxState={key:'whip',dir:'asc'};
 let pboxFilter='';
 function renderPitcherBox(){
   const state=loadState();

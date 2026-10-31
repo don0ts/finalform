@@ -53,31 +53,8 @@ table.detail td{text-align:center;font-size:12px;padding:6px 8px;border-bottom:1
 table.detail td.left{text-align:left}
 .chk{color:#4ade80;font-weight:700}
 .dim{color:#475569}
-/* ---- subtle category dividers ---- */
 .player-head .badge.pbadge{background:rgba(56,189,248,.15);color:var(--accent)}
-table.stats thead tr:not(.grp) th:nth-child(4),
-table.stats thead tr:not(.grp) th:nth-child(7),
-table.stats thead tr:not(.grp) th:nth-child(11),
-table.stats thead tr:not(.grp) th:nth-child(12),
-table.stats tbody td:nth-child(4),
-table.stats tbody td:nth-child(7),
-table.stats tbody td:nth-child(11),
-table.stats tbody td:nth-child(12){border-left:1px solid rgba(148,163,184,.22)}
 table.pstats{min-width:1480px}
-table.pstats thead tr:not(.grp) th:nth-child(4),
-table.pstats thead tr:not(.grp) th:nth-child(7),
-table.pstats thead tr:not(.grp) th:nth-child(11),
-table.pstats thead tr:not(.grp) th:nth-child(15),
-table.pstats thead tr:not(.grp) th:nth-child(19),
-table.pstats thead tr:not(.grp) th:nth-child(23),
-table.pstats tbody td:nth-child(4),
-table.pstats tbody td:nth-child(7),
-table.pstats tbody td:nth-child(11),
-table.pstats tbody td:nth-child(15),
-table.pstats tbody td:nth-child(19),
-table.pstats tbody td:nth-child(23){border-left:1px solid rgba(148,163,184,.22)}
-table.stats thead tr.grp th+th,
-table.pstats thead tr.grp th+th{border-left:1px solid rgba(148,163,184,.22)}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#22c55e;color:#052e12;padding:11px 20px;border-radius:10px;font-weight:700;box-shadow:0 8px 30px rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:.25s;z-index:60}
 .toast.show{opacity:1}
 
