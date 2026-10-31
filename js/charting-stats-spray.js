@@ -193,7 +193,9 @@ function drawHeat(evs){
     ctx.imageSmoothingEnabled=true; ctx.drawImage(small,0,0,GW,GH,0,0,W,H);
     _heatGrid={GW,GH,wsum,qsum,peak,n:pts.length};
   }
-  const zx=0.28*W, zy=0.22*H, zw=0.44*W, zh=0.50*H;
+  // Strike-zone box at the true ratios the charting tool uses to place pitches:
+  // a 130x164 zone inside a 500x460 area, centered at 50%/47%.
+  const zw=0.26*W, zh=(164/460)*H, zx=(0.50-0.13)*W, zy=(0.47-(164/460)/2)*H;
   ctx.strokeStyle='rgba(230,240,255,0.85)'; ctx.lineWidth=2; ctx.strokeRect(zx,zy,zw,zh);
   ctx.strokeStyle='rgba(230,240,255,0.35)'; ctx.lineWidth=1;
   for(let i=1;i<3;i++){ ctx.beginPath(); ctx.moveTo(zx+zw*i/3,zy); ctx.lineTo(zx+zw*i/3,zy+zh); ctx.stroke(); ctx.beginPath(); ctx.moveTo(zx,zy+zh*i/3); ctx.lineTo(zx+zw,zy+zh*i/3); ctx.stroke(); }

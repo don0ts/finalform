@@ -269,7 +269,7 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:6px}
 .sz-zone .zgv2{left:66.66%;top:0;width:1px;height:100%}
 .sz-zone .zgh1{top:33.33%;left:0;height:1px;width:100%}
 .sz-zone .zgh2{top:66.66%;left:0;height:1px;width:100%}
-.sz-circle{position:absolute;width:18px;height:18px;border-radius:50%;background:rgba(122,138,154,0.55);border:2px solid #7a8a9a;transform:translate(-50%,-50%);pointer-events:auto;cursor:crosshair;display:flex;align-items:center;justify-content:center}
+.sz-circle{position:absolute;width:20px;height:20px;border-radius:50%;background:rgba(122,138,154,0.55);border:2px solid #7a8a9a;transform:translate(-50%,-50%);pointer-events:auto;cursor:crosshair;display:flex;align-items:center;justify-content:center}
 .sz-circle.latest{box-shadow:0 0 0 3px rgba(255,255,255,0.25)}
 .sz-circle.sel{box-shadow:0 0 0 3px #fff,0 0 14px 5px rgba(255,255,255,0.85);z-index:5}
 /* selected pitch glow + play log cards */
