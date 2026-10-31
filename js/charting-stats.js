@@ -8,6 +8,8 @@ const PITCH_GROUP_LABEL = {FB:'Fastball', BB:'Breaking Ball', OS:'OffSpeed'};
 const TRAJ_LABEL = {GB:'Groundball', LD:'Linedrive', FB:'Flyball', PU:'Popup'};
 
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+/* Small R/L "Side" descriptor shown next to a faced hitter/pitcher name. */
+function sideTag(s){ s=String(s==null?'':s).toUpperCase().charAt(0); if(s!=='R'&&s!=='L') return ''; return ' <span class="side-tag">'+s+'</span>'; }
 function evSwing(e){ return e && (e.swing==='InPlay'||e.swing==='Whiff'||e.swing==='Foul'); }
 function evContact(e){ return e && (e.swing==='InPlay'||e.swing==='Foul'); }
 function fmtPct(num, den){ if (!den) return '--'; return ((num/den)*100).toFixed(2)+'%'; }
@@ -93,7 +95,7 @@ function detailHtml(id,evs){
     +'<th>#</th><th>Pitcher</th><th>Pitch Group</th><th>Velo</th><th>Location</th><th>Swing</th><th>Contact</th><th>Contact Quality</th><th>Batted Ball</th><th>Batted to</th><th>PA Outcome</th></tr></thead><tbody>';
   evs.forEach((e,i)=>{
     t+='<tr><td>'+(i+1)+'</td>'
-      +'<td>'+(e.pitcher?esc(e.pitcher):'<span class="dim">--</span>')+'</td>'
+      +'<td>'+(e.pitcher?esc(e.pitcher)+sideTag(e.throw_side):'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.pitch_group?esc(PITCH_GROUP_LABEL[e.pitch_group]||e.pitch_group):'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.velo||'<span class="dim">--</span>')+'</td>'
       +'<td>'+esc(locText(e))+'</td>'
@@ -236,7 +238,7 @@ function pdetailHtml(id,evs){
     +'<th>#</th><th>Hitter</th><th>Pitch Group</th><th>Velo</th><th>Location</th><th>Ball/Strike</th><th>Swing</th><th>Contact</th><th>Contact Quality</th><th>Batted Ball</th><th>Batted to</th><th>PA Outcome</th></tr></thead><tbody>';
   evs.forEach((e,i)=>{
     t+='<tr><td>'+(i+1)+'</td>'
-      +'<td>'+(e.player?esc(e.player):'<span class="dim">--</span>')+'</td>'
+      +'<td>'+(e.player?esc(e.player)+sideTag(e.bat_side):'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.pitch_group?esc(PITCH_GROUP_LABEL[e.pitch_group]||e.pitch_group):'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.velo||'<span class="dim">--</span>')+'</td>'
       +'<td>'+esc(locText(e))+'</td>'

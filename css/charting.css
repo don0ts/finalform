@@ -449,6 +449,10 @@ select option, select optgroup{background:#0b1724;color:#eaf6ff}
 .segtab{padding:7px 16px;border:1px solid var(--soft-border);border-radius:999px;background:#0b1220;font-size:13px;cursor:pointer;user-select:none;font-weight:600;color:var(--muted)}
 .segtab:hover{border-color:var(--accent);color:#fff}
 .segtab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.hand-row{display:flex;align-items:center;gap:8px;margin-top:6px}
+.hand-lbl{font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:var(--muted);font-weight:700}
+.segtabs.sm{gap:6px}
+.segtabs.sm .segtab{padding:3px 12px;font-size:12px}
 .ep-root{display:flex;flex-direction:column;gap:10px}
 .ep-head{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap}
 .ep-toggle{display:flex;align-items:center;gap:14px}

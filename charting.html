@@ -26,6 +26,7 @@
         <div style="display:flex;gap:8px;align-items:center">
           <div class="pill">Event</div>
           <select id="session-select"></select>
+          <button id="delete-session-btn" class="btn ghost small">Delete Event</button>
         </div>
         <div class="right-actions">
           <span class="connstate" id="connState" data-state="connecting">Connecting…</span>
@@ -107,10 +108,12 @@
               <div class="select-col">
                 <span class="lbl">PITCHER</span>
                 <select id="active-pitcher"></select>
+                <div class="hand-row"><span class="hand-lbl">Throws</span><div class="segtabs sm" id="pitcher-hand"></div></div>
               </div>
               <div class="select-col">
                 <span class="lbl">HITTER</span>
                 <select id="active-hitter"></select>
+                <div class="hand-row"><span class="hand-lbl">Bats</span><div class="segtabs sm" id="hitter-hand"></div></div>
               </div>
             </div>
           </div>

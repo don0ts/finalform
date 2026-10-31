@@ -62,7 +62,7 @@ function startPlayerCacheListener(){
   try {
     _db.collection(COLLECTION).onSnapshot(
       snap => {
-        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id) }; });
+        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id), bats:(data.bats||data.bat||''), throws:(data.throws||data.throw||'') }; });
         list.sort((a,b)=> a.name.localeCompare(b.name));
         _playerCache = list; _playerCache._listening = true;
         _playerCacheReady = true; _playerCacheError = false;
@@ -328,6 +328,7 @@ let floatState = { left:null, top:null, size:96 };
 /* DOM refs */
 const sessionSelect = $('session-select');
 const createSessionBtn = $('create-session-btn');
+const deleteSessionBtn = $('delete-session-btn');
 const clearLogBtn = $('clear-log-btn');
 const logSearchInput = $('log-search');
 const logSearchClear = $('log-search-clear');
@@ -398,6 +399,7 @@ const _syncedCache = {};          // session id -> JSON of last successfully-que
 const _localEditTs = {};          // session id -> last time THIS device changed it (push)
 const _cloudMeta = {};            // session id -> last _updatedAt seen from the cloud
 let _knownSessionIds = new Set(); // session ids this page has written, for deletion sync
+const _deletedIds = new Set();    // session ids deleted on this page; never re-add from inbound snapshots
 function _cloudSafe(obj){ try { return JSON.parse(JSON.stringify(obj)); } catch(e){ return null; } }
 function syncSessionsToDb(){
   if (!_db) return;
@@ -467,6 +469,7 @@ function startChartingSessionsListener(){
         if (_syncedCache[id] === incomingJson) return;            // our own echo
         const i = state.sessions.findIndex(function(s){ return String(s.id)===String(id); });
         if (i < 0){
+          if (_deletedIds.has(String(id))) return;                // deleted here; ignore stale inbound copy
           state.sessions.push(incoming); _syncedCache[id] = incomingJson; changed = true;
         } else {
           const localTs = _localEditTs[String(id)] || 0;
@@ -536,6 +539,8 @@ function getCurrentSession(){ return state.sessions.find(s => s.id === state.cur
 function ensureSessionClock(sess){ if (!sess.clock) sess.clock = { running:false, elapsedBefore:0, startTimestamp:null }; }
 function allocEventId(store){ let m=0; (store && store.events ? store.events : []).forEach(e=>{ if (typeof e.id==='number' && e.id>m) m=e.id; }); return m+1; }
 function ensureSessionCounters(sess){
+  if (!sess.handBats) sess.handBats = {};
+  if (!sess.handThrows) sess.handThrows = {};
   if (typeof sess.nextContactId !== 'number'){ let m=0; sess.events.forEach(e=>{ if (typeof e.contact==='number' && e.contact>m) m=e.contact; }); sess.nextContactId=m+1; }
   if (typeof sess.nextPlayId !== 'number'){ let m=0; sess.events.forEach(e=>{ if (typeof e.play==='number' && e.play>m) m=e.play; }); sess.nextPlayId=m+1; }
 }
@@ -747,9 +752,9 @@ async function openOptionsModal(index){
     + '</div></div>';
   const res = await showModal({ title:'Options', html, buttons:[{label:'Save',value:'save',className:'btn'},{label:'Edit Play',value:'editplay',className:'btn'},{label:'Delete',value:'delete',className:'btn warn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
   if (res==='cancel' || !res) return;
-  if (res==='editplay'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); } await classifyPitch(ev, ev.inzone); ev.contact = evContact(ev)?(ev.contact||1):''; ev.play = evPlayLabel(ev); ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
+  if (res==='editplay'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); ev.bat_side=batSideFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); ev.throw_side=throwSideFor(sess,pp); } await classifyPitch(ev, ev.inzone); ev.contact = evContact(ev)?(ev.contact||1):''; ev.play = evPlayLabel(ev); ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
   if (res==='delete'){ const c = await showModal({ title:'Delete entry?', message:'Delete this log entry?', buttons:[{label:'Delete',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if (!c) return; sess.events.splice(index,1); selState.idx=null; selState.whole=false; saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
-  if (res==='save'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); } ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
+  if (res==='save'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); ev.bat_side=batSideFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); ev.throw_side=throwSideFor(sess,pp); } ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
 }
 
 /* ===== PLAY-level options modal (edits last play + applies matchup to all pitches in the card) ===== */
@@ -789,7 +794,7 @@ async function openPlayOptionsModal(g){
     saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return;
   }
   const hh=$('pmodal-hitter').value, pp=$('pmodal-pitcher').value, late=$('pmodal-late').checked, early=$('pmodal-early').checked;
-  function applyMatchup(){ g.pitches.forEach(p=>{ if(hh){ p.ev.player=hh; p.ev.player_id=playerIdFor(sess,hh); } if(pp){ p.ev.pitcher=pp; p.ev.pitcher_id=playerIdFor(sess,pp); } }); }
+  function applyMatchup(){ g.pitches.forEach(p=>{ if(hh){ p.ev.player=hh; p.ev.player_id=playerIdFor(sess,hh); p.ev.bat_side=batSideFor(sess,hh); } if(pp){ p.ev.pitcher=pp; p.ev.pitcher_id=playerIdFor(sess,pp); p.ev.throw_side=throwSideFor(sess,pp); } }); }
   if (res==='editplay'){
     applyMatchup();
     await classifyPitch(term, term.inzone);
@@ -1306,7 +1311,7 @@ async function floatLogClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
   const _ck = ensureClockForLog(sess);
   const team=sess.teams[state.currentSide];
-  const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
+  const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bat_side:batSideFor(sess,team.selectedHitter), throw_side:throwSideFor(sess,team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
   sess.events.push(ev); saveAll(); renderLog(); updatePitcherCountBadges();
   flashElement(floatBtn); showToast('Logged #'+ev.id+' - '+msToToastTime(ev.timecode_ms));
 }
@@ -1315,7 +1320,7 @@ async function floatContactClicked(){
   const _ck = ensureClockForLog(sess);
   ensureSessionCounters(sess);
   const team=sess.teams[state.currentSide];
-  const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:sess.nextContactId++, play:'' };
+  const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bat_side:batSideFor(sess,team.selectedHitter), throw_side:throwSideFor(sess,team.selectedPitcher), bad_data:'NO', notes:{}, contact:sess.nextContactId++, play:'' };
   sess.events.push(ev); saveAll(); renderLog(); updatePitcherCountBadges();
   flashElement(floatContactBtn); showToast('Contact #'+ev.contact+' - '+msToToastTime(ev.timecode_ms), 'contact');
 }
@@ -1543,6 +1548,23 @@ function buildDataCsv(sess, players, trackmanId, tod){
   });
   return lines.join('\r\n');
 }
+// R/L handedness for the active matchup. A per-session override (set via the
+// R/L toggles beside the dropdowns) wins; otherwise fall back to the player's
+// profile value (Bats for hitters, Throws for pitchers) from the live cache.
+function batSideFor(sess, name){
+  if(!name) return '';
+  if(sess && sess.handBats && sess.handBats[name]) return sess.handBats[name];
+  const hit=_playerCache.find(pl=> pl.name && pl.name.toLowerCase()===String(name).toLowerCase());
+  if(hit && hit.bats) return String(hit.bats).toUpperCase().charAt(0);
+  return '';
+}
+function throwSideFor(sess, name){
+  if(!name) return '';
+  if(sess && sess.handThrows && sess.handThrows[name]) return sess.handThrows[name];
+  const hit=_playerCache.find(pl=> pl.name && pl.name.toLowerCase()===String(name).toLowerCase());
+  if(hit && hit.throws) return String(hit.throws).toUpperCase().charAt(0);
+  return '';
+}
 // Resolve a player's ID + Bats/Throws using the same logic as Edit Players:
 // match the stored id against player_id OR the Firestore doc id (handles
 // merged/edited records), then fall back to a name match; load Bats/Throws
@@ -1608,6 +1630,23 @@ createSessionBtn.addEventListener('click', async ()=>{
   const s=buildDefaultSession(nm, dt); state.sessions.push(s); state.currentSessionId=s.id; saveAll(); renderAll();
 });
 clearLogBtn.addEventListener('click', clearLog);
+if (deleteSessionBtn) deleteSessionBtn.addEventListener('click', async ()=>{
+  const sess=getCurrentSession();
+  if(!sess) return showModal({title:'No event',message:'There is no event to delete.',buttons:[{label:'OK',value:true}]});
+  const ok=await showModal({title:'Delete Event', message:'Delete \u201c'+sess.name+'\u201d and all of its charted data? This cannot be undone.', buttons:[{label:'Delete',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]});
+  if(!ok) return;
+  const id=sess.id;
+  _deletedIds.add(String(id));
+  const i=state.sessions.findIndex(s=>s.id===id);
+  if(i>=0) state.sessions.splice(i,1);
+  delete _syncedCache[id]; delete _localEditTs[id]; delete _cloudMeta[id];
+  if(_db){ try{ _db.collection(CHARTING_COLLECTION).doc(String(id)).delete().catch(()=>{}); }catch(e){} }
+  if(state.sessions.length){ state.currentSessionId=state.sessions[0].id; }
+  else { const s=buildDefaultSession('Event 1', new Date().toISOString().slice(0,10)); state.sessions=[s]; state.currentSessionId=s.id; }
+  selState.idx=null; selState.whole=false;
+  saveAll(); renderAll();
+  showToast('Event deleted');
+});
 /* Lock Floating Buttons: when checked, floating buttons can't be dragged or resized
    (prevents accidentally moving them instead of tapping on touch devices). */
 if (lockFloatsCheckbox){
@@ -1861,9 +1900,25 @@ function renderActiveSelects(){
   const team=sess.teams[state.currentSide];
   activePitcherSel.innerHTML = team.pitchers.map(p=>'<option value="'+escapeHtml(p)+'"'+(team.selectedPitcher===p?' selected':'')+'>'+escapeHtml(p)+'</option>').join('');
   activeHitterSel.innerHTML = team.hitters.map(h=>'<option value="'+escapeHtml(h)+'"'+(team.selectedHitter===h?' selected':'')+'>'+escapeHtml(h)+'</option>').join('');
+  renderHandToggles(sess, team);
+}
+/* R/L toggles beside the matchup dropdowns: pitcher = Throws, hitter = Bats.
+   Editable per session, defaulting to the player's profile value. */
+function renderHandToggles(sess, team){
+  const pHand=$('pitcher-hand'), hHand=$('hitter-hand');
+  if(pHand){
+    const cur=throwSideFor(sess, team.selectedPitcher);
+    pHand.innerHTML=['R','L'].map(v=>'<div class="segtab'+(cur===v?' active':'')+'" data-v="'+v+'">'+v+'</div>').join('');
+  }
+  if(hHand){
+    const cur=batSideFor(sess, team.selectedHitter);
+    hHand.innerHTML=['R','L'].map(v=>'<div class="segtab'+(cur===v?' active':'')+'" data-v="'+v+'">'+v+'</div>').join('');
+  }
 }
 if (activePitcherSel) activePitcherSel.addEventListener('change', ()=>{ const sess=getCurrentSession(); if(!sess) return; sess.teams[state.currentSide].selectedPitcher=activePitcherSel.value; saveAll(); renderPlayerLists(); });
 if (activeHitterSel) activeHitterSel.addEventListener('change', ()=>{ const sess=getCurrentSession(); if(!sess) return; sess.teams[state.currentSide].selectedHitter=activeHitterSel.value; saveAll(); renderPlayerLists(); });
+if ($('pitcher-hand')) $('pitcher-hand').addEventListener('click', (e)=>{ const t=e.target.closest('.segtab'); if(!t) return; const sess=getCurrentSession(); if(!sess) return; const team=sess.teams[state.currentSide]; if(!team.selectedPitcher) return; if(!sess.handThrows) sess.handThrows={}; sess.handThrows[team.selectedPitcher]=t.getAttribute('data-v'); saveAll(); renderActiveSelects(); });
+if ($('hitter-hand')) $('hitter-hand').addEventListener('click', (e)=>{ const t=e.target.closest('.segtab'); if(!t) return; const sess=getCurrentSession(); if(!sess) return; const team=sess.teams[state.currentSide]; if(!team.selectedHitter) return; if(!sess.handBats) sess.handBats={}; sess.handBats[team.selectedHitter]=t.getAttribute('data-v'); saveAll(); renderActiveSelects(); });
 
 /* ----- strike zone render ----- */
 function renderStrikeZone(){
@@ -2292,6 +2347,7 @@ async function strikeZoneClick(e){
   const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))),
     player:team.selectedHitter||'', player_id:playerIdFor(sess,team.selectedHitter),
     pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess,team.selectedPitcher),
+    bat_side:batSideFor(sess,team.selectedHitter), throw_side:throwSideFor(sess,team.selectedPitcher),
     pitch_x:px, pitch_y:py, inzone:inzone,
     pitch_group:'', velo:'', location:(inzone?'InZone':'OutOfZone'), swing:'', pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'',
     result:[], ball_strike:'', bad_data:'NO', notes:{}, contact:'', play:'' };
