@@ -55,7 +55,7 @@ function startPlayerCacheListener(){
   try {
     _db.collection(COLLECTION).onSnapshot(
       snap => {
-        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), name:playerDocName(data, d.id) }; });
+        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id) }; });
         list.sort((a,b)=> a.name.localeCompare(b.name));
         _playerCache = list; _playerCache._listening = true;
         _playerCacheReady = true; _playerCacheError = false;
@@ -1332,7 +1332,7 @@ function collectSessionPlayers(sess){
   });
   return Array.from(map.values());
 }
-function buildDataCsv(sess, vals){
+function buildDataCsv(sess, players, trackmanId, tod){
   const DEV_EXPORT=[
     {label:'Trackman',    bt:'Bats', tt:'Throws'},
     {label:'Blast',       bt:'Bats', tt:'Throws'},
@@ -1344,11 +1344,13 @@ function buildDataCsv(sess, vals){
   const hdr=['Name','player_id_cubs','event_date','is_pitcher_test','Position'];
   DEV_EXPORT.forEach(d=>{ for(let s=0;s<SLOTS;s++){ hdr.push(d.label+'_ID', d.label, d.label+'_'+d.bt, d.label+'_'+d.tt, d.label+'_tod'); } });
   const lines=[meta.map(csvEscape).join(','), hdr.map(csvEscape).join(',')];
-  vals.forEach(v=>{
+  players.forEach(v=>{
     const row=[ v.name, v.id||'', (sess.date||''), v.pitcher?'TRUE':'FALSE', v.pitcher?'P':'' ];
     DEV_EXPORT.forEach((d,di)=>{
       for(let s=0;s<SLOTS;s++){
-        if(di===0 && s===0){ row.push(v.id||'', v.name, '', '', v.tod||''); }
+        // Only the first Trackman slot is filled: ID = the single Trackman device
+        // id, label = player name, Bats/Throws = the player's profile, tod = Time of Day.
+        if(di===0 && s===0){ row.push(trackmanId||'', v.name, v.bats||'', v.throws||'', tod||''); }
         else { row.push('','','','',''); }
       }
     });
@@ -1356,22 +1358,55 @@ function buildDataCsv(sess, vals){
   });
   return lines.join('\r\n');
 }
+// Resolve a player's ID + Bats/Throws using the same logic as Edit Players:
+// match the stored id against player_id OR the Firestore doc id (handles
+// merged/edited records), then fall back to a name match; load Bats/Throws
+// from the resolved doc. Returns null when the player has no ID.
+async function resolvePlayerForData(sess, name){
+  let id=playerIdFor(sess, name);
+  let hit=null;
+  if(id){ hit=_playerCache.find(pl=> String(pl.id)===String(id) || String(pl.docId)===String(id)); }
+  if(!hit){ hit=_playerCache.find(pl=>pl.name && pl.name.toLowerCase()===name.toLowerCase()); }
+  if(hit){ id=hit.id; }
+  if(id==null || id==='') return null;
+  const docId=hit ? (hit.docId||hit.id) : id;
+  let bats='', throws='';
+  if(_db){
+    try{ const doc=await _db.collection(COLLECTION).doc(String(docId)).get();
+      if(doc && doc.exists){ const d=doc.data()||{};
+        bats=(d.bats||d.bat||'').toString().charAt(0).toLowerCase();
+        throws=(d.throws||d.throw||'').toString().charAt(0).toLowerCase();
+      }
+    }catch(e){}
+  }
+  return { id:String(id), bats:bats, throws:throws };
+}
 async function exportDataCsv(){
   const sess=getCurrentSession();
   if(!sess){ return showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); }
   const roster=collectSessionPlayers(sess);
   if(!roster.length){ return showModal({title:'No players',message:'Add at least one player first.',buttons:[{label:'OK',value:true}]}); }
-  const rows=roster.map((p,i)=>'<tr><td style="padding:4px 6px">'+escapeHtml(p.name)+(p.pitcher?' <small style="color:var(--muted)">(P)</small>':'')+'</td>'
-    +'<td style="padding:4px 6px"><input id="dc-id-'+i+'" value="'+escapeHtml(playerIdFor(sess,p.name)||'')+'" placeholder="Trackman ID" style="width:120px;padding:6px;border-radius:6px;border:1px solid var(--soft-border)"/></td>'
-    +'<td style="padding:4px 6px"><input id="dc-tod-'+i+'" placeholder="Time of Day" style="width:120px;padding:6px;border-radius:6px;border:1px solid var(--soft-border)"/></td></tr>').join('');
-  const html='<div style="max-height:52vh;overflow:auto"><table style="border-collapse:collapse;width:100%"><thead><tr>'
-    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Player</th>'
-    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Trackman ID</th>'
-    +'<th style="text-align:left;padding:4px 6px;font-size:12px">Time of Day</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  showToast('Resolving player IDs\u2026');
+  const players=[];
+  for(const p of roster){
+    const r=await resolvePlayerForData(sess, p.name);
+    if(!r) continue; // skip players without a player id
+    players.push({ name:p.name, pitcher:p.pitcher, id:r.id, bats:r.bats, throws:r.throws });
+  }
+  if(!players.length){ return showModal({title:'No players with IDs',message:'The Data CSV only includes players that have a Player ID. None of the current players have one \u2014 add IDs in Edit Players first.',buttons:[{label:'OK',value:true}]}); }
+  const listRows=players.map(p=>'<li>'+escapeHtml(p.name)+' <small style="color:var(--muted)">(ID '+escapeHtml(p.id)+')</small></li>').join('');
+  const optStyle=' style="background:#1e293b;color:#fff"';
+  const html='<div style="display:flex;flex-direction:column;gap:10px">'
+    +'<label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)">Trackman ID<input id="dc-tm-id" placeholder="e.g. 23500017" style="padding:8px;border-radius:8px;border:1px solid var(--soft-border)"/></label>'
+    +'<label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)">Time of Day<select id="dc-tod" style="padding:8px;border-radius:8px;border:1px solid var(--soft-border);background:#1e293b;color:#fff"><option value="Morning"'+optStyle+'>Morning</option><option value="Afternoon"'+optStyle+'>Afternoon</option><option value="Evening"'+optStyle+'>Evening</option></select></label>'
+    +'<div class="muted-note" style="font-size:12px">Applied to all '+players.length+' player(s) with a Player ID:</div>'
+    +'<ul style="margin:0;padding-left:18px;max-height:30vh;overflow:auto;font-size:13px">'+listRows+'</ul>'
+    +'</div>';
   const res=await showModal({ title:'Data CSV', html, buttons:[{label:'Export',value:'export',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
   if(res!=='export') return;
-  const vals=roster.map((p,i)=>({ name:p.name, pitcher:p.pitcher, id:($('dc-id-'+i)?$('dc-id-'+i).value.trim():''), tod:($('dc-tod-'+i)?$('dc-tod-'+i).value.trim():'') }));
-  downloadCsv(sanitizeEventName(sess.name)+'_Data.csv', buildDataCsv(sess, vals));
+  const tmId=($('dc-tm-id')?$('dc-tm-id').value.trim():'');
+  const tod=($('dc-tod')?$('dc-tod').value:'');
+  downloadCsv(sanitizeEventName(sess.name)+'_Data.csv', buildDataCsv(sess, players, tmId, tod));
   showToast('Data CSV exported');
 }
 
@@ -1527,8 +1562,16 @@ function pitchInfoStr(ev){
   return parts.join(' \u00b7 ');
 }
 function circleClass(ev){
-  // Pitch-zone markers are colored purely by location: out of zone = green, in zone = red.
-  return ev.inzone ? 'c-inzone' : 'c-outzone';
+  // Strike-zone markers are colored by the pitch result (same as before the
+  // zone-color change, which only applies to the Change Pitch Location mini-zone):
+  // InPlay = blue, Whiff = intense red, Foul = yellow, called strike = light red,
+  // ball = green.
+  if(ev.swing==='InPlay') return 'c-inplay';
+  if(ev.swing==='Whiff') return 'c-whiff';
+  if(ev.swing==='Foul') return 'c-foul';
+  if(ev.ball_strike==='Ball') return 'c-ball';
+  if(ev.ball_strike==='Strike') return 'c-cstrike';
+  return '';
 }
 
 /* ----- play grouping + selection + descriptions ----- */
