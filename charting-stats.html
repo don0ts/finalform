@@ -21,13 +21,39 @@
 
 <div class="wrap">
   <div class="stab-bar">
-    <button class="stab active" data-stab="stats">Hitter Stats</button>
-    <button class="stab" data-stab="pstats">Pitcher Stats</button>
+    <button class="stab active" data-stab="hbox">Hitter Stats</button>
+    <button class="stab" data-stab="pbox">Pitcher Stats</button>
+    <button class="stab" data-stab="stats">Hitter Percentiles</button>
+    <button class="stab" data-stab="pstats">Pitcher Percentiles</button>
     <button class="stab" data-stab="spray">Hitter Spray Chart &amp; Heatmaps</button>
     <button class="stab" data-stab="pviz">Pitcher Visualization</button>
   </div>
 
-  <div id="stab-stats" class="stab-panel active">
+  <div id="stab-hbox" class="stab-panel active">
+    <div class="toolbar">
+      <div class="search">
+        <span style="color:var(--muted)">🔍</span>
+        <input type="text" id="hbox-search" placeholder="Search by hitter name…" autocomplete="off" />
+      </div>
+      <span class="count-note" id="hbox-count"></span>
+      <button id="hbox-refresh">Refresh</button>
+    </div>
+    <div id="hbox-root"></div>
+  </div>
+
+  <div id="stab-pbox" class="stab-panel">
+    <div class="toolbar">
+      <div class="search">
+        <span style="color:var(--muted)">🔍</span>
+        <input type="text" id="pbox-search" placeholder="Search by pitcher name…" autocomplete="off" />
+      </div>
+      <span class="count-note" id="pbox-count"></span>
+      <button id="pbox-refresh">Refresh</button>
+    </div>
+    <div id="pbox-root"></div>
+  </div>
+
+  <div id="stab-stats" class="stab-panel">
     <div class="toolbar">
       <div class="search">
         <span style="color:var(--muted)">🔍</span>
@@ -115,5 +141,6 @@
 
 <script src="js/charting-stats.js"></script>
 <script src="js/charting-stats-spray.js"></script>
+<script src="js/charting-stats-tables.js"></script>
 </body>
 </html>

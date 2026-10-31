@@ -80,3 +80,14 @@ table.stats thead tr.grp th+th,
 table.pstats thead tr.grp th+th{border-left:1px solid rgba(148,163,184,.22)}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#22c55e;color:#052e12;padding:11px 20px;border-radius:10px;font-weight:700;box-shadow:0 8px 30px rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:.25s;z-index:60}
 .toast.show{opacity:1}
+
+/* Hitter Stats / Pitcher Stats counting-stat tables */
+table.stats.basic-stats{min-width:760px}
+table.stats.basic-stats thead th,
+table.stats.basic-stats tbody td{border-left:none}
+table.stats.basic-stats thead th.left,
+table.stats.basic-stats tbody td.left{text-align:left}
+.stats th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+.stats th.sortable:hover{color:var(--accent)}
+.stats th.sorted{color:#eaf2ff}
+table.stats.basic-stats tbody tr:hover td{background:rgba(56,189,248,.06)}
