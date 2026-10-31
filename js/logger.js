@@ -1,5 +1,5 @@
-const STORAGE_KEY = 'pitch_recorder_compact_v1';
-const FLOAT_KEY = 'pitch_recorder_compact_float_v1';
+const STORAGE_KEY = 'pitch_logger_local_v1';
+const FLOAT_KEY = 'pitch_logger_local_float_v1';
 
 const $ = id => document.getElementById(id);
 function uid(prefix){ return (prefix||'id') + '_' + Math.random().toString(36).slice(2,9); }
