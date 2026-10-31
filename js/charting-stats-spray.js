@@ -337,7 +337,11 @@ function buildPvizZone(evs){
   const pts=evs.filter(e=> e.pitch_x!=null && e.pitch_y!=null);
   let svg='<svg viewBox="0 0 '+W+' '+H+'" class="pviz-svg" preserveAspectRatio="xMidYMid meet">';
   svg+='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="#07121b"/>';
-  const zx=0.28*W, zy=0.22*H, zw=0.44*W, zh=0.50*H;
+  // Strike-zone box drawn at the SAME ratios the charting tool uses to place
+  // pitches: a 130x164 zone inside a 500x460 area, centered at 50%/47%.
+  // (Previously the box was wider/taller than the real zone, which made pitches
+  // look closer to the zone than they actually were.)
+  const zw=0.26*W, zh=(164/460)*H, zx=(0.50-0.13)*W, zy=(0.47-(164/460)/2)*H;
   svg+='<rect x="'+zx+'" y="'+zy+'" width="'+zw+'" height="'+zh+'" fill="rgba(56,189,248,0.04)" stroke="rgba(230,240,255,0.85)" stroke-width="2"/>';
   for(let i=1;i<3;i++){
     svg+='<line x1="'+ff(zx+zw*i/3)+'" y1="'+ff(zy)+'" x2="'+ff(zx+zw*i/3)+'" y2="'+ff(zy+zh)+'" stroke="rgba(230,240,255,0.3)" stroke-width="1"/>';

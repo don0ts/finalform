@@ -269,7 +269,7 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:6px}
 .sz-zone .zgv2{left:66.66%;top:0;width:1px;height:100%}
 .sz-zone .zgh1{top:33.33%;left:0;height:1px;width:100%}
 .sz-zone .zgh2{top:66.66%;left:0;height:1px;width:100%}
-.sz-circle{position:absolute;width:24px;height:24px;border-radius:50%;background:rgba(122,138,154,0.55);border:2px solid #7a8a9a;transform:translate(-50%,-50%);pointer-events:auto;cursor:crosshair;display:flex;align-items:center;justify-content:center}
+.sz-circle{position:absolute;width:18px;height:18px;border-radius:50%;background:rgba(122,138,154,0.55);border:2px solid #7a8a9a;transform:translate(-50%,-50%);pointer-events:auto;cursor:crosshair;display:flex;align-items:center;justify-content:center}
 .sz-circle.latest{box-shadow:0 0 0 3px rgba(255,255,255,0.25)}
 .sz-circle.sel{box-shadow:0 0 0 3px #fff,0 0 14px 5px rgba(255,255,255,0.85);z-index:5}
 /* selected pitch glow + play log cards */
@@ -293,7 +293,7 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:6px}
 .play-card.live .play-pitches::before{background:linear-gradient(180deg,rgba(79,157,255,0.55),rgba(79,157,255,0.12))}
 .pitch-item{cursor:pointer}
 .pitch-item.sel{border-color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,0.65) inset,0 0 10px 1px rgba(255,255,255,0.35);background:rgba(255,255,255,0.05)}
-.sz-num{color:#fff;font-size:12px;font-weight:900;line-height:1;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,0.6)}
+.sz-num{color:#fff;font-size:10px;font-weight:900;line-height:1;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,0.6)}
 .sz-count{font-size:14px;font-weight:800;letter-spacing:.3px;color:#eaf6ff}
 .sz-status{font-size:14px;font-weight:800;letter-spacing:.3px;padding:6px 14px;border-radius:999px;border:1px solid var(--soft-border);color:var(--muted)}
 .sz-status.inzone{color:#bfe8ff;border-color:rgba(79,157,255,0.4);background:rgba(79,157,255,0.08)}
