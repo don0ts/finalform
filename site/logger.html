@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Pitch Event Recorder — Game + Workout</title>
+<link rel="stylesheet" href="css/logger.css"/>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+</head>
+<body>
+  <nav class="sitenav">
+    <a class="navlink" id="gotoHome" href="index.html">Home</a>
+    <a class="navlink" id="gotoLogger" href="logger.html">Logger</a>
+    <a class="navlink" id="gotoCharting" href="charting.html">Charting</a>
+    <a class="navlink" id="gotoProfiles" href="profile_manager.html">Profiles</a>
+    <a class="navlink" id="gotoStatus" href="status.html">Status</a>
+  </nav>
+  <div class="app">
+    <div class="bar">
+      <div style="display:flex;flex-direction:column">
+        <h1>Pitch Event Recorder</h1>
+        <div class="subtitle">Game and Workout tracking. Compact UI with big Log animation.</div>
+      </div>
+      <div class="controls-row" style="width:100%">
+        <div style="display:flex;gap:8px;align-items:center">
+          <div class="pill">Event</div>
+          <select id="session-select"></select>
+        </div>
+        <div class="right-actions">
+          <button id="create-session-btn" class="btn small">Create Event</button>
+          <button id="clear-log-btn" class="btn ghost small">Clear Log</button>
+          <label id="lock-floats-label" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap"><input type="checkbox" id="lock-floats" /> Lock Floating Buttons</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="main-tabs">
+      <button id="tab-game" class="active">Game</button>
+      <button id="tab-workout">Workout</button>
+    </div>
+
+    <div class="bar" style="flex-direction:column;gap:8px">
+      <div style="display:flex;gap:8px;align-items:center;width:100%;flex-wrap:wrap">
+        <div class="clock" id="clock-display">00:00.000</div>
+        <div class="clock-controls" style="margin-left:8px">
+          <button id="start-btn" class="btn small">Start</button>
+          <button id="pause-btn" class="btn ghost small">Pause</button>
+          <button id="reset-btn" class="btn ghost small">Reset</button>
+        </div>
+        <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+          <div class="dropdown">
+            <button id="export-btn" class="btn small">Game CSV</button>
+            <div class="dropdown-menu" id="game-csv-menu">
+              <button data-gcsv="pitches">Pitches CSV</button>
+              <button data-gcsv="plays">Plays CSV</button>
+            </div>
+          </div>
+          <button id="data-csv-btn" class="btn small" style="background:#6d6df0">Data CSV</button>
+          <div class="dropdown">
+            <button id="workout-csv-btn" class="btn small" style="background:#2f9c6d">Workout CSV</button>
+            <div class="dropdown-menu" id="workout-csv-menu">
+              <button data-wcsv="dash">60 Yard Dash CSV</button>
+              <div class="sep"></div>
+              <button data-wcsv="of">Outfielders CSV</button>
+              <button data-wcsv="if">Infielders CSV</button>
+              <button data-wcsv="c">Catchers CSV</button>
+              <div class="sep"></div>
+              <button data-wcsv="alldef">All Defense CSV</button>
+              <button data-wcsv="allbp">All BP CSV</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="muted-note" id="clock-hint">Game: Top/Bot lineups, pitchers then hitters.</div>
+    </div>
+
+    <div id="game-tab">
+      <div class="panels">
+        <div class="panel">
+          <h3>Players</h3>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+            <div class="segmented">
+              <button id="side-top" class="active">Top</button>
+              <button id="side-bot">Bot</button>
+            </div>
+            <button id="sync-ids-btn" class="btn small ghost" style="margin-left:auto">Sync IDs</button>
+            <button id="edit-players-btn" class="btn small" style="background:var(--hitter-blue)">Edit Players</button>
+          </div>
+
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px">
+              <div class="list-header">
+                <span class="lbl">PITCHERS</span>
+                <span class="list-tools">
+                  <button class="tool-btn" id="copy-pitchers" title="Copy pitcher list">COPY</button>
+                  <button class="tool-btn" id="paste-pitchers" title="Paste pitcher list">PASTE</button>
+                </span>
+              </div>
+              <div class="add-row">
+                <input id="add-pitcher" placeholder="Add Pitcher" type="text" />
+                <button id="add-pitcher-btn" class="btn small" style="background:var(--pitch-red);border-radius:8px">Add</button>
+              </div>
+              <div class="list" id="pitchers-list" style="margin-top:6px"></div>
+
+              <div style="height:10px"></div>
+
+              <div class="list-header">
+                <span class="lbl">HITTERS</span>
+                <span class="list-tools">
+                  <button class="tool-btn" id="copy-hitters" title="Copy hitter list">COPY</button>
+                  <button class="tool-btn" id="paste-hitters" title="Paste hitter list">PASTE</button>
+                </span>
+              </div>
+              <div class="add-row">
+                <input id="add-hitter" placeholder="Add Hitter" type="text" />
+                <button id="add-hitter-btn" class="btn small">Add</button>
+              </div>
+              <div class="list" id="hitters-list" style="margin-top:6px"></div>
+            </div>
+
+            <div style="flex:1;min-width:200px">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <h3 style="margin:0;font-size:14px">Log</h3>
+                  <div class="muted-note">Tap Options to edit or delete</div>
+                </div>
+                <div class="log-checkbox-row">
+                  <label><input type="checkbox" id="chk-pitch-log" checked /> Pitch Log</label>
+                  <label><input type="checkbox" id="chk-contact-log" /> Contact Log</label>
+                  <label><input type="checkbox" id="chk-play-log" /> Play Log</label>
+                </div>
+                <div class="log-list" id="log-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="workout-tab" style="display:none">
+      <div class="bar" style="padding:6px">
+        <div class="segmented" style="width:100%">
+          <button id="wsec-dash" style="flex:1">60 Yard Dash</button>
+          <button id="wsec-defense" style="flex:1">Defense</button>
+          <button id="wsec-bp" style="flex:1">Batting Practice</button>
+        </div>
+      </div>
+
+      <!-- 60 YARD DASH SECTION -->
+      <div id="dash-section" style="display:none">
+        <div class="panels">
+          <div class="panel">
+            <h3>60 Yard Dash</h3>
+            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <div style="flex:1;min-width:220px">
+                <div class="list-header">
+                  <span class="lbl">RUNNERS</span>
+                  <span class="list-tools">
+                    <button class="tool-btn" data-copy="dash" title="Copy">COPY</button>
+                    <button class="tool-btn" data-paste="dash" title="Paste">PASTE</button>
+                    <button class="tool-btn export" data-export-dash="1" title="Store Dash CSV">EXPORT</button>
+                  </span>
+                </div>
+                <div class="add-row">
+                  <input id="add-dash" placeholder="Add Runner" type="text" />
+                  <button id="add-dash-btn" class="btn small" style="background:var(--dash-orange)">Add</button>
+                </div>
+                <div class="list" id="dash-list" style="margin-top:6px"></div>
+              </div>
+
+              <div style="flex:1;min-width:220px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <h3 style="margin:0;font-size:14px">Dash Log</h3>
+                  <div class="muted-note">Select a runner, then tap the floating Log.</div>
+                </div>
+                <div class="log-list" id="dash-log-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DEFENSE SECTION -->
+      <div id="defense-section" style="display:none">
+        <div class="panels">
+          <div class="panel">
+            <h3>Defense Players</h3>
+            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <div style="flex:1;min-width:220px">
+                <div class="list-header">
+                  <span class="lbl">OUTFIELDERS</span>
+                  <span class="list-tools">
+                    <button class="tool-btn" data-copy="outfielders" title="Copy">COPY</button>
+                    <button class="tool-btn" data-paste="outfielders" title="Paste">PASTE</button>
+                    <button class="tool-btn export" data-export-def="outfielders" title="Store Outfielders CSV">EXPORT</button>
+                  </span>
+                </div>
+                <div class="add-row">
+                  <input id="add-of" placeholder="Add Outfielder" type="text" />
+                  <button id="add-of-btn" class="btn small" style="background:var(--of-green)">Add</button>
+                </div>
+                <div class="list" id="of-list" style="margin-top:6px"></div>
+
+                <div style="height:8px"></div>
+                <div class="list-header">
+                  <span class="lbl">INFIELDERS</span>
+                  <span class="list-tools">
+                    <button class="tool-btn" data-copy="infielders" title="Copy">COPY</button>
+                    <button class="tool-btn" data-paste="infielders" title="Paste">PASTE</button>
+                    <button class="tool-btn export" data-export-def="infielders" title="Store Infielders CSV">EXPORT</button>
+                  </span>
+                </div>
+                <div class="add-row">
+                  <input id="add-if" placeholder="Add Infielder" type="text" />
+                  <button id="add-if-btn" class="btn small" style="background:var(--if-amber)">Add</button>
+                </div>
+                <div class="list" id="if-list" style="margin-top:6px"></div>
+
+                <div style="height:8px"></div>
+                <div class="list-header">
+                  <span class="lbl">CATCHERS</span>
+                  <span class="list-tools">
+                    <button class="tool-btn" data-copy="catchers" title="Copy">COPY</button>
+                    <button class="tool-btn" data-paste="catchers" title="Paste">PASTE</button>
+                    <button class="tool-btn export" data-export-def="catchers" title="Store Catchers CSV">EXPORT</button>
+                  </span>
+                </div>
+                <div class="add-row">
+                  <input id="add-c" placeholder="Add Catcher" type="text" />
+                  <button id="add-c-btn" class="btn small" style="background:var(--c-purple)">Add</button>
+                </div>
+                <div class="list" id="c-list" style="margin-top:6px"></div>
+              </div>
+
+              <div style="flex:1;min-width:220px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <h3 style="margin:0;font-size:14px">Defense Log</h3>
+                  <div class="muted-note">Select a player, then tap the floating Log.</div>
+                </div>
+                <div class="log-list" id="defense-log-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BATTING PRACTICE SECTION -->
+      <div id="bp-section" style="display:none">
+        <div class="panels">
+          <div class="panel">
+            <h3>Batting Practice Players</h3>
+            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <div style="flex:1;min-width:220px">
+                <div class="list-header">
+                  <span class="lbl">PLAYERS</span>
+                  <span class="list-tools">
+                    <button class="tool-btn" data-copy="bp" title="Copy">COPY</button>
+                    <button class="tool-btn" data-paste="bp" title="Paste">PASTE</button>
+                    <button class="tool-btn export" data-export-bp="1" title="Store BP CSV">EXPORT</button>
+                  </span>
+                </div>
+                <div class="angle-row">
+                  <label><input type="checkbox" id="angle-side" checked /> Side</label>
+                  <label><input type="checkbox" id="angle-behind" /> Behind Home</label>
+                </div>
+                <div class="add-row">
+                  <input id="add-bp" placeholder="Add Player" type="text" />
+                  <button id="add-bp-btn" class="btn small" style="background:var(--bp-teal)">Add</button>
+                </div>
+                <div class="list" id="bp-list" style="margin-top:6px"></div>
+              </div>
+
+              <div style="flex:1;min-width:220px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <h3 style="margin:0;font-size:14px">Batting Practice Log</h3>
+                  <div class="muted-note">Angle set by checkboxes.</div>
+                </div>
+                <div class="log-list" id="bp-log-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CSV STORAGE -->
+    <div class="csv-storage">
+      <div class="csv-storage-head">
+        <h3 style="margin:0">CSV Storage</h3>
+        <button id="download-all-btn" class="btn small" style="background:#2f9c6d">Download All</button>
+      </div>
+      <div id="csv-storage-list"></div>
+    </div>
+
+    <footer id="footer-note">Autosaves locally.</footer>
+  </div>
+
+  <button id="float-log-btn" class="float-log" aria-label="Log">Log</button>
+  <button id="float-contact-btn" class="float-contact" aria-label="Contact">Contact</button>
+  <button id="float-play-btn" class="float-play" aria-label="Play">Play</button>
+  <button id="float-workout-btn" class="float-workout" aria-label="Workout Log">Log</button>
+  <button id="float-start-btn" class="float-start" aria-label="Start Clock"><span class="fs-ico"></span></button>
+
+  <div id="toast-container" aria-hidden="true"></div>
+  <div id="modal-root" class="modal-root"></div>
+
+<script src="js/logger.js"></script>
+</body>
+</html>

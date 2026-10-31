@@ -703,11 +703,10 @@ async function editPlayersModal(){
   const hitters=Array.from(new Set(sess.teams.top.hitters.concat(sess.teams.bot.hitters)));
   const pitchers=Array.from(new Set(sess.teams.top.pitchers.concat(sess.teams.bot.pitchers)));
   const lineup=Array.from(new Set(pitchers.concat(hitters)));
-  const POSITIONS=['','P','C','1B','2B','3B','SS','LF','CF','RF','OF','IF','DH','UTIL'];
-  const CLASSES=['','Fr','So','Jr','Sr','GR'];
-  const BATS=['','R','L','S'];
-  const THROWS=['','R','L'];
+  const POSITIONS=['','P','C','1B','2B','3B','SS','IF','LF','CF','RF','OF','DH','UTIL'];
+  const CLASSES=['']; for(var _y=2016;_y<=2037;_y++) CLASSES.push(String(_y));
   const sel=(arr,cur)=>arr.map(o=>'<option value="'+escapeHtml(o)+'"'+(o===cur?' selected':'')+'>'+(o===''?'--':escapeHtml(o))+'</option>').join('');
+  const segRow=(id,label)=>'<div class="ep-seg-row"><span class="ep-seg-lbl">'+label+'</span><div class="segtabs" id="'+id+'"><div class="segtab" data-v="R">R</div><div class="segtab" data-v="L">L</div></div></div>';
   const dbNote = _db? '' : '<div class="muted-note" style="color:var(--pitch-red)">Database offline — the lineup will update, but no profile is written.</div>';
   const html='<div style="display:flex;flex-direction:column;gap:8px">'
     + dbNote
@@ -718,29 +717,39 @@ async function editPlayersModal(){
     + '</select>'
     + '<div class="ep-grid">'
     + '<label>Player Name<input id="ep-name" type="text" /></label>'
-    + '<label>Player ID<input id="ep-id" type="text" /></label>'
+    + '<label>ID (Player ID Cubs)<input id="ep-id" type="text" /></label>'
     + '<label>Position<select id="ep-pos">'+sel(POSITIONS,'')+'</select></label>'
     + '<label>Class<select id="ep-class">'+sel(CLASSES,'')+'</select></label>'
-    + '<label>Bats<select id="ep-bats">'+sel(BATS,'')+'</select></label>'
-    + '<label>Throws<select id="ep-throws">'+sel(THROWS,'')+'</select></label>'
-    + '<label>Date of Birth<input id="ep-dob" type="date" /></label>'
+    + '<label>Date of birth<input id="ep-dob" type="date" /></label>'
     + '</div>'
+    + segRow('ep-bats','Bats')
+    + segRow('ep-throws','Throws')
     + '<div id="ep-status" class="muted-note" style="font-size:12px"></div>'
     + '</div>';
   const p=showModal({ title:'Edit Players', html, buttons:[{label:'Save',value:'save',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
   const playerSel=$('ep-player');
+  function setSeg(id,val){ const c=$(id); if(!c) return; const v=(val||'').toString().charAt(0).toUpperCase(); c.querySelectorAll('.segtab').forEach(t=> t.classList.toggle('active', t.getAttribute('data-v')===v)); }
+  function getSeg(id){ const c=$(id); if(!c) return ''; const a=c.querySelector('.segtab.active'); return a?a.getAttribute('data-v'):''; }
+  ['ep-bats','ep-throws'].forEach(id=>{ const c=$(id); if(!c) return; c.querySelectorAll('.segtab').forEach(t=> t.addEventListener('click', ()=>{ const on=t.classList.contains('active'); c.querySelectorAll('.segtab').forEach(x=>x.classList.remove('active')); if(!on) t.classList.add('active'); })); });
   async function fillForm(name){
-    const nameEl=$('ep-name'), idEl=$('ep-id'), posEl=$('ep-pos'), clsEl=$('ep-class'), batEl=$('ep-bats'), thrEl=$('ep-throws'), dobEl=$('ep-dob'), st=$('ep-status');
-    if(name==='__new__'){ nameEl.value=''; idEl.value=''; posEl.value=''; clsEl.value=''; batEl.value=''; thrEl.value=''; dobEl.value=''; st.textContent='Enter a new player profile.'; return; }
+    const nameEl=$('ep-name'), idEl=$('ep-id'), posEl=$('ep-pos'), clsEl=$('ep-class'), dobEl=$('ep-dob'), st=$('ep-status');
+    if(name==='__new__'){ nameEl.value=''; idEl.value=''; posEl.value=''; clsEl.value=''; setSeg('ep-bats',''); setSeg('ep-throws',''); dobEl.value=''; st.textContent='Enter a new player profile.'; return; }
     nameEl.value=name;
     let id=playerIdFor(sess,name);
-    if(!id){ const m=_playerCache.find(pl=>pl.name && pl.name.toLowerCase()===name.toLowerCase()); if(m) id=m.id; }
-    idEl.value=id||''; posEl.value=''; clsEl.value=''; batEl.value=''; thrEl.value=''; dobEl.value='';
+    // Detect the existing DB record even if it was merged/edited: match the
+    // stored id against either the player_id field or the Firestore doc id,
+    // then fall back to a name match. Use the real doc id to load the profile.
+    let hit=null;
+    if(id){ hit=_playerCache.find(pl=> String(pl.id)===String(id) || String(pl.docId)===String(id)); }
+    if(!hit){ hit=_playerCache.find(pl=>pl.name && pl.name.toLowerCase()===name.toLowerCase()); }
+    if(hit){ id=hit.id; }
+    const docId=hit ? (hit.docId||hit.id) : id;
+    idEl.value=id||''; posEl.value=''; clsEl.value=''; setSeg('ep-bats',''); setSeg('ep-throws',''); dobEl.value='';
     if(id && _db){ st.textContent='Loading profile\u2026';
-      try{ const doc=await _db.collection(COLLECTION).doc(String(id)).get();
+      try{ const doc=await _db.collection(COLLECTION).doc(String(docId)).get();
         if(doc && doc.exists){ const d=doc.data()||{};
           posEl.value=d.position||d.pos||''; clsEl.value=d.class||d.year||d.grade||'';
-          batEl.value=(d.bats||d.bat||'').toString().charAt(0).toUpperCase(); thrEl.value=(d.throws||d.throw||'').toString().charAt(0).toUpperCase();
+          setSeg('ep-bats',(d.bats||d.bat||'')); setSeg('ep-throws',(d.throws||d.throw||''));
           dobEl.value=d.dob||d.birthdate||d.birth_date||''; st.textContent='Loaded from database.';
         } else { st.textContent='No database profile yet \u2014 fill and save to create.'; }
       }catch(e){ st.textContent='Could not load profile (offline?).'; }
@@ -755,7 +764,7 @@ async function editPlayersModal(){
   const newName=$('ep-name').value.trim();
   const id=$('ep-id').value.trim();
   if(!newName){ await showModal({title:'Edit Players', message:'Please enter a player name.'}); return; }
-  const data={ player_name:newName, position:$('ep-pos').value, class:$('ep-class').value, bats:$('ep-bats').value, throws:$('ep-throws').value, dob:$('ep-dob').value };
+  const data={ player_name:newName, position:$('ep-pos').value, class:$('ep-class').value, bats:getSeg('ep-bats'), throws:getSeg('ep-throws'), dob:$('ep-dob').value };
   if(id) data.player_id=id;
   let wrote=false;
   let alreadyInDb=false;
@@ -1822,10 +1831,6 @@ async function pitchInfoModal(ev, geomInzone){
     +   '<button type="button" class="pk swing-pick hollow" data-sw="Take">Take</button>'
     +   '<button type="button" class="pk swing-pick hollow" data-sw="Foul">Foul</button>'
     + '</div>'
-    + '<div class="field-sect" id="field-sect" style="display:none">'
-    +   '<div class="muted-note" style="margin:6px 0">Tap where the ball was hit. Behind the plate defaults to C; beyond the fence is a Home Run.</div>'
-    +   '<div class="field-wrap">'+buildFieldSvg()+'</div>'
-    + '</div>'
     + '<div class="sect-lbl">Result</div>'
     + '<div class="result-row">'
     +   '<div class="result-top">'
@@ -1846,7 +1851,6 @@ async function pitchInfoModal(ev, geomInzone){
   function locVal(){ const picked=modalRoot.querySelector('input[name=locx]:checked'); return picked?picked.value:(inzone?'InZone':'OutOfZone'); }
   const swBtns = Array.from(modalRoot.querySelectorAll('[data-sw]'));
   const resBtns = Array.from(modalRoot.querySelectorAll('[data-res]'));
-  const fieldSect = modalRoot.querySelector('#field-sect');
   const locxBtns = Array.from(modalRoot.querySelectorAll('input[name=locx]'));
   locxBtns.forEach(b=> b.addEventListener('change', ()=>{ if(b.checked){ locxBtns.forEach(o=>{ if(o!==b) o.checked=false; }); } }));
   function resDisabled(name){
@@ -1856,10 +1860,11 @@ async function pitchInfoModal(ev, geomInzone){
     return true;                               // InPlay / Foul -> none enabled
   }
   function paintRes(){ resBtns.forEach(b=>{ const dis=resDisabled(b.getAttribute('data-res')); b.disabled=dis; b.classList.toggle('res-off', dis); }); }
-  function paintSwing(){ swBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-sw')===swingSel)); fieldSect.style.display=(swingSel==='InPlay')?'block':'none'; paintRes(); }
+  function paintSwing(){ swBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-sw')===swingSel)); paintRes(); }
   swBtns.forEach(b=> b.addEventListener('click', ()=>{
     const v=b.getAttribute('data-sw');
     if(v==='Foul'){ swingSel='Foul'; paintSwing(); finish({ location:locVal(), swing:'Foul', ball_strike:'Strike', result:[], pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'' }); return; }
+    if(v==='InPlay'){ swingSel='InPlay'; paintSwing(); finish({ __goField__:true, location:locVal() }); return; }
     swingSel=v; paintSwing();
   }));
   resBtns.forEach(b=> b.addEventListener('click', ()=>{
@@ -1873,37 +1878,9 @@ async function pitchInfoModal(ev, geomInzone){
     else { bs='Ball'; result=[r]; }
     finish({ location:locVal(), swing:sw, ball_strike:bs, result:result, pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'' });
   }));
-  // InPlay field: tap landing location -> gated batted-ball popup.
-  const wrap=modalRoot.querySelector('.field-wrap');
-  const svgEl=modalRoot.querySelector('.field-svg');
-  const SVGNS='http://www.w3.org/2000/svg';
-  let markerEl=null, bbOpen=false;
-  function placeMarker(sx,sy){ if(markerEl) markerEl.remove(); markerEl=document.createElementNS(SVGNS,'g'); markerEl.setAttribute('class','fld-marker'); markerEl.setAttribute('pointer-events','none'); const r1=document.createElementNS(SVGNS,'circle'); r1.setAttribute('cx',sx); r1.setAttribute('cy',sy); r1.setAttribute('r','9'); r1.setAttribute('class','fld-marker-ring'); const r2=document.createElementNS(SVGNS,'circle'); r2.setAttribute('cx',sx); r2.setAttribute('cy',sy); r2.setAttribute('r','3.4'); r2.setAttribute('class','fld-marker-dot'); markerEl.appendChild(r1); markerEl.appendChild(r2); svgEl.appendChild(markerEl); }
-  function clearMarker(){ if(markerEl){ markerEl.remove(); markerEl=null; } }
-  function nearestPos(sx,sy){ let best=null,bd=1e12; Object.keys(POS_CENTERS).forEach(k=>{ const c=POS_CENTERS[k]; const d=(c.x-sx)*(c.x-sx)+(c.y-sy)*(c.y-sy); if(d<bd){ bd=d; best=k; } }); return best; }
-  async function onFieldClick(clientX, clientY){
-    if(bbOpen) return;
-    const r=svgEl.getBoundingClientRect();
-    const sx=(clientX-r.left)/r.width*FIELD_VB_W;
-    const sy=(clientY-r.top)/r.height*FIELD_VB_H;
-    placeMarker(sx,sy);
-    const dx=sx-FIELD_H.x, up=FIELD_H.y-sy; const rad=Math.hypot(dx,up); const ang=Math.atan2(dx,up)*180/Math.PI;
-    let pos, num, isHR=false;
-    if(up<=0){ pos='C'; num='2'; }
-    else if(rad>FIELD_FENCE && Math.abs(ang)<=47){ isHR=true; pos='HR'; num= ang<-15?'7':(ang>15?'9':'8'); }
-    else { pos=nearestPos(sx,sy); num=POS_NUM[pos]||''; }
-    bbOpen=true;
-    const bb = await battedBallPopup(ev, pos, num, isHR, wrap, sx, sy);
-    bbOpen=false;
-    if(bb===null){ clearMarker(); return; }
-    const hx=sx/FIELD_VB_W, hy=sy/FIELD_VB_H;
-    finish({ location:locVal(), swing:'InPlay', ball_strike:'Strike', result:[], pa_outcome:bb.pa_outcome, contact_quality:bb.contact_quality, batted_ball:bb.batted_ball, batted_to:bb.batted_to, hit_x:hx, hit_y:hy });
-  }
-  svgEl.addEventListener('click', (e)=>{ onFieldClick(e.clientX, e.clientY); });
   function piOnKey(e){
-    if(bbOpen) return;
     const k=(e.key||'').toLowerCase();
-    if(k==='i'){ e.preventDefault(); swingSel='InPlay'; paintSwing(); }
+    if(k==='i'){ e.preventDefault(); const b=swBtns.find(x=>x.getAttribute('data-sw')==='InPlay'); if(b) b.click(); }
     else if(k==='w'){ e.preventDefault(); swingSel='Whiff'; paintSwing(); }
     else if(k==='t'){ e.preventDefault(); swingSel='Take'; paintSwing(); }
     else if(k==='f'){ e.preventDefault(); swingSel='Foul'; paintSwing(); finish({ location:locVal(), swing:'Foul', ball_strike:'Strike', result:[], pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'' }); }
@@ -1992,7 +1969,7 @@ function buildFieldSvg(){
   svg+='</svg>';
   return svg;
 }
-async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
+async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy, onInit){
   return new Promise(resolve=>{
     const BB_DEFS=[['GB','G'],['LD','L'],['FB','F'],['PU','P']];
     const CQ_DEFS=[['Bunt','B'],['Weak','W'],['Avg','A'],['Hard','H']];
@@ -2022,6 +1999,7 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
     function cleanup(){ document.removeEventListener('keydown',onKey,true); popupEl.remove(); }
     function done(){ cleanup(); resolve({ pa_outcome:pickPA, contact_quality:pickCQ, batted_ball:pickBB, batted_to:pickBTo, homerun:isHR }); }
     function cancel(){ cleanup(); resolve(null); }
+    if(typeof onInit==='function') onInit(cancel);
     function pickBBType(v){ pickBB=v; paint(bbWrap,pickBB); cqRow.style.display='block'; if(pickBB==='PU'){ pickCQType('Weak'); } }
     function pickCQType(v){ pickCQ=v; paint(cqWrap,pickCQ); btoRow.style.display='block'; paint(btoWrap,pickBTo); if(pickBTo){ pickBToVal(pickBTo); } }
     function pickBToVal(v){ pickBTo=v; paint(btoWrap,pickBTo); paRow.style.display='block'; }
@@ -2041,8 +2019,58 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
     document.addEventListener('keydown', onKey, true);
   });
 }
+function applyPitchInfo(ev, info){
+  ev.location=info.location; ev.swing=info.swing; ev.ball_strike=info.ball_strike||'';
+  ev.result=info.result||[];
+  ev.pa_outcome=info.pa_outcome||''; ev.contact_quality=info.contact_quality||''; ev.batted_ball=info.batted_ball||''; ev.batted_to=info.batted_to||'';
+  if('hit_x' in info){ ev.hit_x=info.hit_x; ev.hit_y=info.hit_y; }
+  else { ev.hit_x=null; ev.hit_y=null; }
+  ev.play=evPlayLabel(ev);
+}
+// Field Spray Chart: its own step in the classify flow (reached when InPlay is
+// chosen on Pitch Info). Tap to drop a marker; tap a different spot to move it.
+async function fieldSprayModal(ev){
+  const html = '<div class="muted-note" style="margin:6px 0">Tap where the ball was hit. Behind the plate defaults to C; beyond the fence is a Home Run. Tap a different spot to move it.</div>'
+    + '<div class="field-wrap">'+buildFieldSvg()+'</div>'
+    + '<button type="button" data-resolve="done" id="fs-done" style="display:none"></button>';
+  const p = showModal({ title:'Field Spray Chart', html, showBack:true, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
+  let outcome=null;
+  const doneBtn=$('fs-done');
+  const wrap=modalRoot.querySelector('.field-wrap');
+  const svgEl=modalRoot.querySelector('.field-svg');
+  const SVGNS='http://www.w3.org/2000/svg';
+  let markerEl=null, curCancel=null, clickToken=0;
+  function placeMarker(sx,sy){ if(markerEl) markerEl.remove(); markerEl=document.createElementNS(SVGNS,'g'); markerEl.setAttribute('class','fld-marker'); markerEl.setAttribute('pointer-events','none'); const r1=document.createElementNS(SVGNS,'circle'); r1.setAttribute('cx',sx); r1.setAttribute('cy',sy); r1.setAttribute('r','9'); r1.setAttribute('class','fld-marker-ring'); const r2=document.createElementNS(SVGNS,'circle'); r2.setAttribute('cx',sx); r2.setAttribute('cy',sy); r2.setAttribute('r','3.4'); r2.setAttribute('class','fld-marker-dot'); markerEl.appendChild(r1); markerEl.appendChild(r2); svgEl.appendChild(markerEl); }
+  function clearMarker(){ if(markerEl){ markerEl.remove(); markerEl=null; } }
+  function nearestPos(sx,sy){ let best=null,bd=1e12; Object.keys(POS_CENTERS).forEach(k=>{ const c=POS_CENTERS[k]; const d=(c.x-sx)*(c.x-sx)+(c.y-sy)*(c.y-sy); if(d<bd){ bd=d; best=k; } }); return best; }
+  async function openAt(sx,sy){
+    placeMarker(sx,sy);
+    // A fresh click supersedes any open popup, moving the marker instead of
+    // being blocked by the first placement.
+    if(curCancel){ const c=curCancel; curCancel=null; c(); }
+    const dx=sx-FIELD_H.x, up=FIELD_H.y-sy; const rad=Math.hypot(dx,up); const ang=Math.atan2(dx,up)*180/Math.PI;
+    let pos, num, isHR=false;
+    if(up<=0){ pos='C'; num='2'; }
+    else if(rad>FIELD_FENCE && Math.abs(ang)<=47){ isHR=true; pos='HR'; num= ang<-15?'7':(ang>15?'9':'8'); }
+    else { pos=nearestPos(sx,sy); num=POS_NUM[pos]||''; }
+    const myToken=++clickToken;
+    const bb = await battedBallPopup(ev, pos, num, isHR, wrap, sx, sy, (cancelFn)=>{ curCancel=cancelFn; });
+    if(myToken!==clickToken) return;   // superseded by a later click
+    curCancel=null;
+    if(bb===null){ clearMarker(); return; }
+    const hx=sx/FIELD_VB_W, hy=sy/FIELD_VB_H;
+    outcome={ swing:'InPlay', ball_strike:'Strike', result:[], pa_outcome:bb.pa_outcome, contact_quality:bb.contact_quality, batted_ball:bb.batted_ball, batted_to:bb.batted_to, hit_x:hx, hit_y:hy };
+    doneBtn.click();
+  }
+  svgEl.addEventListener('click', (e)=>{ const r=svgEl.getBoundingClientRect(); const sx=(e.clientX-r.left)/r.width*FIELD_VB_W; const sy=(e.clientY-r.top)/r.height*FIELD_VB_H; openAt(sx,sy); });
+  const res = await p;
+  if(curCancel){ const c=curCancel; curCancel=null; c(); }
+  if(res==='__back__') return '__back__';
+  if(res==='done' && outcome) return outcome;
+  return null;
+}
 async function classifyPitch(ev, geomInzone){
-  let step=0;
+  let step=0, piLoc='';
   while(true){
     if(step===0){
       const pg = await pitchGroupVeloModal(ev);
@@ -2050,16 +2078,19 @@ async function classifyPitch(ev, geomInzone){
       ev.pitch_group=pg.group; ev.velo=pg.velo;
       if(pg.inzone!=null) ev.inzone=pg.inzone;
       step=1;
-    } else {
+    } else if(step===1){
       const info = await pitchInfoModal(ev, ev.inzone);
       if(info==='__back__'){ step=0; continue; }
       if(info===null){ if(await confirmCancel()) return false; else continue; }
-      ev.location=info.location; ev.swing=info.swing; ev.ball_strike=info.ball_strike||'';
-      ev.result=info.result||[];
-      ev.pa_outcome=info.pa_outcome||''; ev.contact_quality=info.contact_quality||''; ev.batted_ball=info.batted_ball||''; ev.batted_to=info.batted_to||'';
-      if('hit_x' in info){ ev.hit_x=info.hit_x; ev.hit_y=info.hit_y; }
-      else { ev.hit_x=null; ev.hit_y=null; }
-      ev.play=evPlayLabel(ev);
+      if(info.__goField__){ piLoc=info.location; step=2; continue; }
+      applyPitchInfo(ev, info);
+      return true;
+    } else {
+      const fr = await fieldSprayModal(ev);
+      if(fr==='__back__'){ step=1; continue; }
+      if(fr===null){ if(await confirmCancel()) return false; else continue; }
+      fr.location=piLoc;
+      applyPitchInfo(ev, fr);
       return true;
     }
   }

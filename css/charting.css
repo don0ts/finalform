@@ -441,8 +441,14 @@ select option, select optgroup{background:#0b1724;color:#eaf6ff}
 /* ===== Edit Players modal grid ===== */
 .ep-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .ep-grid label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted)}
-.ep-grid label:first-child,.ep-grid label:nth-child(7){grid-column:1 / -1}
+.ep-grid label:first-child{grid-column:1 / -1}
 .ep-grid input,.ep-grid select{padding:8px;border-radius:8px;border:1px solid var(--soft-border)}
+.ep-seg-row{display:flex;align-items:center;gap:12px;margin-top:4px}
+.ep-seg-lbl{font-size:12px;color:var(--muted);font-weight:700;min-width:52px}
+.segtabs{display:flex;gap:8px;flex-wrap:wrap}
+.segtab{padding:7px 16px;border:1px solid var(--soft-border);border-radius:999px;background:#0b1220;font-size:13px;cursor:pointer;user-select:none;font-weight:600;color:var(--muted)}
+.segtab:hover{border-color:var(--accent);color:#fff}
+.segtab.active{background:var(--accent);border-color:var(--accent);color:#fff}
 
 /* ===== Redesigned pitch popup (Velo and Pitch Group + Pitch Info) ===== */
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px}

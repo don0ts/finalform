@@ -596,11 +596,10 @@ async function editPlayersModal(){
   const hitters=Array.from(new Set(sess.teams.top.hitters.concat(sess.teams.bot.hitters)));
   const pitchers=Array.from(new Set(sess.teams.top.pitchers.concat(sess.teams.bot.pitchers)));
   const lineup=Array.from(new Set(pitchers.concat(hitters)));
-  const POSITIONS=['','P','C','1B','2B','3B','SS','LF','CF','RF','OF','IF','DH','UTIL'];
-  const CLASSES=['','Fr','So','Jr','Sr','GR'];
-  const BATS=['','R','L','S'];
-  const THROWS=['','R','L'];
+  const POSITIONS=['','P','C','1B','2B','3B','SS','IF','LF','CF','RF','OF','DH','UTIL'];
+  const CLASSES=['']; for(var _y=2016;_y<=2037;_y++) CLASSES.push(String(_y));
   const sel=(arr,cur)=>arr.map(o=>'<option value="'+escapeHtml(o)+'"'+(o===cur?' selected':'')+'>'+(o===''?'--':escapeHtml(o))+'</option>').join('');
+  const segRow=(id,label)=>'<div class="ep-seg-row"><span class="ep-seg-lbl">'+label+'</span><div class="segtabs" id="'+id+'"><div class="segtab" data-v="R">R</div><div class="segtab" data-v="L">L</div></div></div>';
   const dbNote = _db? '' : '<div class="muted-note" style="color:var(--pitch-red)">Database offline — the lineup will update, but no profile is written.</div>';
   const html='<div style="display:flex;flex-direction:column;gap:8px">'
     + dbNote
@@ -611,20 +610,23 @@ async function editPlayersModal(){
     + '</select>'
     + '<div class="ep-grid">'
     + '<label>Player Name<input id="ep-name" type="text" /></label>'
-    + '<label>Player ID<input id="ep-id" type="text" /></label>'
+    + '<label>ID (Player ID Cubs)<input id="ep-id" type="text" /></label>'
     + '<label>Position<select id="ep-pos">'+sel(POSITIONS,'')+'</select></label>'
     + '<label>Class<select id="ep-class">'+sel(CLASSES,'')+'</select></label>'
-    + '<label>Bats<select id="ep-bats">'+sel(BATS,'')+'</select></label>'
-    + '<label>Throws<select id="ep-throws">'+sel(THROWS,'')+'</select></label>'
-    + '<label>Date of Birth<input id="ep-dob" type="date" /></label>'
+    + '<label>Date of birth<input id="ep-dob" type="date" /></label>'
     + '</div>'
+    + segRow('ep-bats','Bats')
+    + segRow('ep-throws','Throws')
     + '<div id="ep-status" class="muted-note" style="font-size:12px"></div>'
     + '</div>';
   const p=showModal({ title:'Edit Players', html, buttons:[{label:'Save',value:'save',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
   const playerSel=$('ep-player');
+  function setSeg(id,val){ const c=$(id); if(!c) return; const v=(val||'').toString().charAt(0).toUpperCase(); c.querySelectorAll('.segtab').forEach(t=> t.classList.toggle('active', t.getAttribute('data-v')===v)); }
+  function getSeg(id){ const c=$(id); if(!c) return ''; const a=c.querySelector('.segtab.active'); return a?a.getAttribute('data-v'):''; }
+  ['ep-bats','ep-throws'].forEach(id=>{ const c=$(id); if(!c) return; c.querySelectorAll('.segtab').forEach(t=> t.addEventListener('click', ()=>{ const on=t.classList.contains('active'); c.querySelectorAll('.segtab').forEach(x=>x.classList.remove('active')); if(!on) t.classList.add('active'); })); });
   async function fillForm(name){
-    const nameEl=$('ep-name'), idEl=$('ep-id'), posEl=$('ep-pos'), clsEl=$('ep-class'), batEl=$('ep-bats'), thrEl=$('ep-throws'), dobEl=$('ep-dob'), st=$('ep-status');
-    if(name==='__new__'){ nameEl.value=''; idEl.value=''; posEl.value=''; clsEl.value=''; batEl.value=''; thrEl.value=''; dobEl.value=''; st.textContent='Enter a new player profile.'; return; }
+    const nameEl=$('ep-name'), idEl=$('ep-id'), posEl=$('ep-pos'), clsEl=$('ep-class'), dobEl=$('ep-dob'), st=$('ep-status');
+    if(name==='__new__'){ nameEl.value=''; idEl.value=''; posEl.value=''; clsEl.value=''; setSeg('ep-bats',''); setSeg('ep-throws',''); dobEl.value=''; st.textContent='Enter a new player profile.'; return; }
     nameEl.value=name;
     let id=playerIdFor(sess,name);
     // Detect the existing DB record even if it was merged/edited: match the
@@ -635,12 +637,12 @@ async function editPlayersModal(){
     if(!hit){ hit=_playerCache.find(pl=>pl.name && pl.name.toLowerCase()===name.toLowerCase()); }
     if(hit){ id=hit.id; }
     const docId=hit ? (hit.docId||hit.id) : id;
-    idEl.value=id||''; posEl.value=''; clsEl.value=''; batEl.value=''; thrEl.value=''; dobEl.value='';
+    idEl.value=id||''; posEl.value=''; clsEl.value=''; setSeg('ep-bats',''); setSeg('ep-throws',''); dobEl.value='';
     if(id && _db){ st.textContent='Loading profile\u2026';
       try{ const doc=await _db.collection(COLLECTION).doc(String(docId)).get();
         if(doc && doc.exists){ const d=doc.data()||{};
           posEl.value=d.position||d.pos||''; clsEl.value=d.class||d.year||d.grade||'';
-          batEl.value=(d.bats||d.bat||'').toString().charAt(0).toUpperCase(); thrEl.value=(d.throws||d.throw||'').toString().charAt(0).toUpperCase();
+          setSeg('ep-bats',(d.bats||d.bat||'')); setSeg('ep-throws',(d.throws||d.throw||''));
           dobEl.value=d.dob||d.birthdate||d.birth_date||''; st.textContent='Loaded from database.';
         } else { st.textContent='No database profile yet — fill and save to create.'; }
       }catch(e){ st.textContent='Could not load profile (offline?).'; }
@@ -655,7 +657,7 @@ async function editPlayersModal(){
   const newName=$('ep-name').value.trim();
   const id=$('ep-id').value.trim();
   if(!newName){ await showModal({title:'Edit Players', message:'Please enter a player name.', buttons:[{label:'OK',value:true}]}); return; }
-  const data={ player_name:newName, position:$('ep-pos').value, class:$('ep-class').value, bats:$('ep-bats').value, throws:$('ep-throws').value, dob:$('ep-dob').value };
+  const data={ player_name:newName, position:$('ep-pos').value, class:$('ep-class').value, bats:getSeg('ep-bats'), throws:getSeg('ep-throws'), dob:$('ep-dob').value };
   if(id) data.player_id=id;
   let wrote=false;
   let alreadyInDb=false;
