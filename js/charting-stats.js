@@ -14,6 +14,13 @@ function evSwing(e){ return e && (e.swing==='InPlay'||e.swing==='Whiff'||e.swing
 function evContact(e){ return e && (e.swing==='InPlay'||e.swing==='Foul'); }
 function fmtPct(num, den){ if (!den) return '--'; return ((num/den)*100).toFixed(2)+'%'; }
 function fmtDate(d){ if (!d) return 'Undated'; const p=String(d).split('-'); if (p.length!==3) return d; return p[1]+'/'+p[2]+'/'+p[0]; }
+/* Label for the top aggregate row: the distinct year(s) the player has data in
+   (e.g. "2026"); falls back to "Season" when no dated events exist. */
+function yearLabel(dates){
+  const ys=Object.keys(dates||{}).map(d=>String(d).slice(0,4)).filter(y=>/^\d{4}$/.test(y));
+  const uniq=ys.filter((y,i)=>ys.indexOf(y)===i).sort();
+  return uniq.length ? uniq.join(' / ') : 'Season';
+}
 function locText(e){ return LOC_LABEL[e.location] || (e.inzone?'In Zone':'Out of Zone'); }
 
 function loadState(){
@@ -80,9 +87,11 @@ function headHtml(){
     +'<th>Hard Hit%</th>'
     +'<th>K%</th><th>BB%</th><th>HR%</th></tr></thead>';
 }
-function rowHtml(id,label,r,cls){
-  return '<tr class="'+cls+'" data-row="'+id+'">'
-    +'<td><button class="arrow-btn" data-toggle="'+id+'" aria-label="expand">\u25B6</button></td>'
+function rowHtml(id,label,r,cls,isYear,ygroup){
+  const tog = isYear ? 'data-toggle-year="'+id+'"' : 'data-toggle="'+id+'"';
+  const grp = ygroup ? ' data-ygroup="'+ygroup+'" style="display:none"' : '';
+  return '<tr class="'+cls+'" data-row="'+id+'"'+grp+'>'
+    +'<td><button class="arrow-btn" '+tog+' aria-label="expand">\u25B6</button></td>'
     +'<td class="left">'+esc(label)+'</td>'
     +'<td>'+r.events+'</td>'
     +'<td>'+r.swing+'</td><td>'+r.chase+'</td><td>'+r.izwhiff+'</td>'
@@ -90,7 +99,8 @@ function rowHtml(id,label,r,cls){
     +'<td>'+r.hard+'</td>'
     +'<td>'+r.k+'</td><td>'+r.bb+'</td><td>'+r.hr+'</td></tr>';
 }
-function detailHtml(id,evs){
+function detailHtml(id,evs,ygroup){
+  const grp = ygroup ? ' data-ygdet="'+ygroup+'"' : '';
   let t='<table class="detail"><thead><tr>'
     +'<th>#</th><th>Pitcher</th><th>Pitch Group</th><th>Velo</th><th>Location</th><th>Swing</th><th>Contact</th><th>Contact Quality</th><th>Batted Ball</th><th>Batted to</th><th>PA Outcome</th></tr></thead><tbody>';
   evs.forEach((e,i)=>{
@@ -107,7 +117,7 @@ function detailHtml(id,evs){
       +'<td>'+(e.pa_outcome||(Array.isArray(e.result)&&e.result.length?esc(e.result.join('/')):'')||'<span class="dim">--</span>')+'</td></tr>';
   });
   t+='</tbody></table>';
-  return '<tr class="detail" id="det_'+id+'" style="display:none"><td colspan="14"><div class="detail-wrap">'+t+'</div></td></tr>';
+  return '<tr class="detail" id="det_'+id+'"'+grp+' style="display:none"><td colspan="14"><div class="detail-wrap">'+t+'</div></td></tr>';
 }
 
 let filterText='';
@@ -129,12 +139,11 @@ function render(){
     html+='<div class="player-block"><div class="player-head"><span class="badge">B</span><span class="nm">'+esc(p)+'</span>'
       +'<span class="meta">'+info.all.length+' pitches</span></div><div class="tablewrap"><table class="stats">'+headHtml()+'<tbody>';
     const sid='s'+(n++);
-    html+=rowHtml(sid,'Season',computeRow(info.all),'season');
-    html+=detailHtml(sid,info.all);
+    html+=rowHtml(sid,yearLabel(info.dates),computeRow(info.all),'season',true);
     Object.keys(info.dates).sort((a,b)=> String(b).localeCompare(String(a))).forEach(d=>{
       const did='s'+(n++);
-      html+=rowHtml(did,fmtDate(d),computeRow(info.dates[d]),'date');
-      html+=detailHtml(did,info.dates[d]);
+      html+=rowHtml(did,fmtDate(d),computeRow(info.dates[d]),'date',false,sid);
+      html+=detailHtml(did,info.dates[d],sid);
     });
     html+='</tbody></table></div></div>';
   });
@@ -144,13 +153,28 @@ function render(){
 function toast(m){ const t=$('toast'); t.textContent=m; t.className='toast show'; setTimeout(()=> t.className='toast',1600); }
 
 document.addEventListener('click',(e)=>{
+  // Year row: uncollapse / collapse all of that player's date rows.
+  const yb=e.target.closest('[data-toggle-year]');
+  if(yb){
+    const g=yb.getAttribute('data-toggle-year');
+    const sumRows=document.querySelectorAll('[data-ygroup="'+g+'"]');
+    if(!sumRows.length) return;
+    let anyHidden=false; sumRows.forEach(r=>{ if(r.style.display==='none') anyHidden=true; });
+    sumRows.forEach(r=>{ r.style.display = anyHidden?'':'none'; });
+    if(!anyHidden){ // collapsing year -> also hide each date's pitch detail + reset its arrow
+      document.querySelectorAll('[data-ygdet="'+g+'"]').forEach(r=> r.style.display='none');
+      sumRows.forEach(r=>{ const a=r.querySelector('.arrow-btn'); if(a) a.classList.remove('open'); });
+    }
+    yb.classList.toggle('open', anyHidden);
+    return;
+  }
   const b=e.target.closest('[data-toggle]'); if(!b) return;
   const det=document.getElementById('det_'+b.getAttribute('data-toggle')); if(!det) return;
   const open=det.style.display==='none'; det.style.display=open?'':'none'; b.classList.toggle('open',open);
 });
 $('search').addEventListener('input',(e)=>{ filterText=e.target.value.trim(); render(); });
-$('expand-all').addEventListener('click',()=>{ document.querySelectorAll('tr.detail').forEach(d=> d.style.display=''); document.querySelectorAll('.arrow-btn').forEach(a=> a.classList.add('open')); });
-$('collapse-all').addEventListener('click',()=>{ document.querySelectorAll('tr.detail').forEach(d=> d.style.display='none'); document.querySelectorAll('.arrow-btn').forEach(a=> a.classList.remove('open')); });
+$('expand-all').addEventListener('click',()=>{ const r=$('stats-root'); if(!r) return; r.querySelectorAll('[data-ygroup]').forEach(d=> d.style.display=''); r.querySelectorAll('tr.detail').forEach(d=> d.style.display=''); r.querySelectorAll('.arrow-btn').forEach(a=> a.classList.add('open')); });
+$('collapse-all').addEventListener('click',()=>{ const r=$('stats-root'); if(!r) return; r.querySelectorAll('[data-ygroup]').forEach(d=> d.style.display='none'); r.querySelectorAll('tr.detail').forEach(d=> d.style.display='none'); r.querySelectorAll('.arrow-btn').forEach(a=> a.classList.remove('open')); });
 $('refresh').addEventListener('click',()=>{ render(); toast('Refreshed'); });
 window.addEventListener('storage',(e)=>{ if(e.key===STORAGE_KEY) render(); });
 render();
@@ -221,9 +245,11 @@ function pheadHtml(){
     +'<th>Overall</th><th>Fastball</th><th>Breaking Ball</th><th>Offspeed</th>'
     +'<th>K%</th><th>BB%</th><th>HR%</th></tr></thead>';
 }
-function prowHtml(id,label,r,cls){
-  return '<tr class="'+cls+'" data-row="'+id+'">'
-    +'<td><button class="arrow-btn" data-toggle="'+id+'" aria-label="expand">\u25B6</button></td>'
+function prowHtml(id,label,r,cls,isYear,ygroup){
+  const tog = isYear ? 'data-toggle-year="'+id+'"' : 'data-toggle="'+id+'"';
+  const grp = ygroup ? ' data-ygroup="'+ygroup+'" style="display:none"' : '';
+  return '<tr class="'+cls+'" data-row="'+id+'"'+grp+'>'
+    +'<td><button class="arrow-btn" '+tog+' aria-label="expand">\u25B6</button></td>'
     +'<td class="left">'+esc(label)+'</td>'
     +'<td>'+r.events+'</td>'
     +'<td>'+r.u_fb+'</td><td>'+r.u_bb+'</td><td>'+r.u_os+'</td>'
@@ -233,7 +259,8 @@ function prowHtml(id,label,r,cls){
     +'<td>'+r.iz_all+'</td><td>'+r.iz_fb+'</td><td>'+r.iz_bb+'</td><td>'+r.iz_os+'</td>'
     +'<td>'+r.k+'</td><td>'+r.bbp+'</td><td>'+r.hr+'</td></tr>';
 }
-function pdetailHtml(id,evs){
+function pdetailHtml(id,evs,ygroup){
+  const grp = ygroup ? ' data-ygdet="'+ygroup+'"' : '';
   let t='<table class="detail"><thead><tr>'
     +'<th>#</th><th>Hitter</th><th>Pitch Group</th><th>Velo</th><th>Location</th><th>Ball/Strike</th><th>Swing</th><th>Contact</th><th>Contact Quality</th><th>Batted Ball</th><th>Batted to</th><th>PA Outcome</th></tr></thead><tbody>';
   evs.forEach((e,i)=>{
@@ -251,7 +278,7 @@ function pdetailHtml(id,evs){
       +'<td>'+(e.pa_outcome||(Array.isArray(e.result)&&e.result.length?esc(e.result.join('/')):'')||'<span class="dim">--</span>')+'</td></tr>';
   });
   t+='</tbody></table>';
-  return '<tr class="detail" id="det_'+id+'" style="display:none"><td colspan="25"><div class="detail-wrap">'+t+'</div></td></tr>';
+  return '<tr class="detail" id="det_'+id+'"'+grp+' style="display:none"><td colspan="25"><div class="detail-wrap">'+t+'</div></td></tr>';
 }
 let pfilterText='';
 function renderPitcherStats(){
@@ -270,18 +297,17 @@ function renderPitcherStats(){
     html+='<div class="player-block"><div class="player-head"><span class="badge pbadge">P</span><span class="nm">'+esc(p)+'</span>'
       +'<span class="meta">'+info.all.length+' pitches</span></div><div class="tablewrap"><table class="stats pstats">'+pheadHtml()+'<tbody>';
     const sid='p'+(n++);
-    html+=prowHtml(sid,'Season',computePitcherRow(info.all),'season');
-    html+=pdetailHtml(sid,info.all);
+    html+=prowHtml(sid,yearLabel(info.dates),computePitcherRow(info.all),'season',true);
     Object.keys(info.dates).sort((a,b)=>String(b).localeCompare(String(a))).forEach(d=>{
       const did='p'+(n++);
-      html+=prowHtml(did,fmtDate(d),computePitcherRow(info.dates[d]),'date');
-      html+=pdetailHtml(did,info.dates[d]);
+      html+=prowHtml(did,fmtDate(d),computePitcherRow(info.dates[d]),'date',false,sid);
+      html+=pdetailHtml(did,info.dates[d],sid);
     });
     html+='</tbody></table></div></div>';
   });
   root.innerHTML=html;
 }
 if($('psearch')) $('psearch').addEventListener('input',(e)=>{ pfilterText=e.target.value.trim(); renderPitcherStats(); });
-if($('pexpand-all')) $('pexpand-all').addEventListener('click',()=>{ $('pstats-root').querySelectorAll('tr.detail').forEach(d=>d.style.display=''); $('pstats-root').querySelectorAll('.arrow-btn').forEach(a=>a.classList.add('open')); });
-if($('pcollapse-all')) $('pcollapse-all').addEventListener('click',()=>{ $('pstats-root').querySelectorAll('tr.detail').forEach(d=>d.style.display='none'); $('pstats-root').querySelectorAll('.arrow-btn').forEach(a=>a.classList.remove('open')); });
+if($('pexpand-all')) $('pexpand-all').addEventListener('click',()=>{ $('pstats-root').querySelectorAll('[data-ygroup]').forEach(d=>d.style.display=''); $('pstats-root').querySelectorAll('tr.detail').forEach(d=>d.style.display=''); $('pstats-root').querySelectorAll('.arrow-btn').forEach(a=>a.classList.add('open')); });
+if($('pcollapse-all')) $('pcollapse-all').addEventListener('click',()=>{ $('pstats-root').querySelectorAll('[data-ygroup]').forEach(d=>d.style.display='none'); $('pstats-root').querySelectorAll('tr.detail').forEach(d=>d.style.display='none'); $('pstats-root').querySelectorAll('.arrow-btn').forEach(a=>a.classList.remove('open')); });
 if($('prefresh')) $('prefresh').addEventListener('click',()=>{ renderPitcherStats(); toast('Refreshed'); });
