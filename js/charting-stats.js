@@ -15,7 +15,10 @@ function fmtDate(d){ if (!d) return 'Undated'; const p=String(d).split('-'); if 
 function locText(e){ return LOC_LABEL[e.location] || (e.inzone?'In Zone':'Out of Zone'); }
 
 function loadState(){
-  try { const r=localStorage.getItem(STORAGE_KEY); if(!r) return {sessions:[]}; const s=JSON.parse(r)||{}; if(!Array.isArray(s.sessions)) s.sessions=[]; return s; }
+  try {
+    if(window._dbReady && Array.isArray(window._dbSessions)) return { sessions: window._dbSessions };
+    const r=localStorage.getItem(STORAGE_KEY); if(!r) return {sessions:[]}; const s=JSON.parse(r)||{}; if(!Array.isArray(s.sessions)) s.sessions=[]; return s;
+  }
   catch(e){ return {sessions:[]}; }
 }
 

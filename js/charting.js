@@ -379,7 +379,46 @@ const DEF_LABEL = { outfielders:'Outfielder', infielders:'Infielder', catchers:'
 const DEF_CLASS = { outfielders:'of', infielders:'if', catchers:'cat' };
 const DEF_ROLE = { outfielders:'OF', infielders:'IF', catchers:'C' };
 
-function saveAll(){ try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); localStorage.setItem(FLOAT_KEY, JSON.stringify(floatState)); } catch(e){ console.warn('save failed', e); } }
+/* ---- Charting sessions -> Firestore (collection "ChartingSessions") ----
+   Every charting session is mirrored up to the cloud so the stats site can read
+   all events regardless of device. Local storage stays the source of truth on
+   this device; the cloud copy is kept in sync on each save. Best-effort: if the
+   write is blocked by Firestore rules it is logged and the app keeps working
+   from local storage. */
+const CHARTING_COLLECTION = 'ChartingSessions';
+let _syncTimer = null;
+const _syncedCache = {};          // session id -> JSON of last successfully-queued write
+let _knownSessionIds = new Set(); // session ids this page has written, for deletion sync
+function _cloudSafe(obj){ try { return JSON.parse(JSON.stringify(obj)); } catch(e){ return null; } }
+function syncSessionsToDb(){
+  if (!_db) return;
+  try {
+    const ids = new Set();
+    (state.sessions || []).forEach(sess => {
+      if (!sess || !sess.id) return;
+      ids.add(sess.id);
+      const json = JSON.stringify(sess);
+      if (_syncedCache[sess.id] === json) return;   // unchanged since last write
+      _syncedCache[sess.id] = json;
+      const payload = _cloudSafe(Object.assign({}, sess, { _updatedAt: Date.now() }));
+      if (!payload) return;
+      _db.collection(CHARTING_COLLECTION).doc(String(sess.id)).set(payload)
+        .catch(err => console.warn('ChartingSessions write failed', sess.id, err));
+    });
+    // delete cloud docs for sessions this page removed
+    _knownSessionIds.forEach(id => {
+      if (!ids.has(id)) {
+        delete _syncedCache[id];
+        _db.collection(CHARTING_COLLECTION).doc(String(id)).delete()
+          .catch(err => console.warn('ChartingSessions delete failed', id, err));
+      }
+    });
+    _knownSessionIds = ids;
+  } catch (e) { console.warn('syncSessionsToDb error', e); }
+}
+function scheduleSync(){ if (_syncTimer) clearTimeout(_syncTimer); _syncTimer = setTimeout(syncSessionsToDb, 1200); }
+
+function saveAll(){ try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); localStorage.setItem(FLOAT_KEY, JSON.stringify(floatState)); } catch(e){ console.warn('save failed', e); } scheduleSync(); }
 function loadAll(){ try { const r = localStorage.getItem(STORAGE_KEY); if (r) state = Object.assign(state, JSON.parse(r) || {}); const fr = localStorage.getItem(FLOAT_KEY); if (fr) floatState = Object.assign(floatState, JSON.parse(fr) || {}); if (!Array.isArray(state.sessions)) state.sessions = []; if (!state.currentSide) state.currentSide = 'top'; if (!state.activeTab) state.activeTab = 'game'; if (!state.workoutSection) state.workoutSection = 'dash'; } catch(e){ console.warn('load failed', e); } }
 
 /* Sessions / model */
