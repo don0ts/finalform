@@ -1055,6 +1055,17 @@ async function ensureClockRunningOrAsk(sess){
   if (!ans) return false;
   sess.clock.running = true; sess.clock.startTimestamp = Date.now(); saveAll(); renderClockButtons(); updateClockDisplay(); return true;
 }
+/* If a log action happens while the clock is stopped, start it from 15s and
+   score that first event at exactly 0:15.000 (15000ms). Returns {autostarted}. */
+function ensureClockForLog(sess){
+  ensureSessionClock(sess);
+  if (sess.clock.running) return { autostarted:false };
+  sess.clock.elapsedBefore = 15000;
+  sess.clock.running = true;
+  sess.clock.startTimestamp = Date.now();
+  saveAll(); renderClockButtons(); updateClockDisplay();
+  return { autostarted:true };
+}
 function startClockCurrent(){ const sess=getCurrentSession(); if(!sess) return; ensureSessionClock(sess); if (sess.clock.running) return; sess.clock.running=true; sess.clock.startTimestamp=Date.now(); saveAll(); renderClockButtons(); updateClockDisplay(); }
 async function pauseClockCurrent(){ const sess=getCurrentSession(); if(!sess) return; ensureSessionClock(sess); const ok=await showModal({ title:'Pause clock', message:'Are you sure you want to pause?', buttons:[{label:'Pause',value:true,className:'btn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if(!ok) return; if (sess.clock.running && sess.clock.startTimestamp) sess.clock.elapsedBefore=computeSessionElapsedMs(sess); sess.clock.running=false; sess.clock.startTimestamp=null; saveAll(); renderClockButtons(); updateClockDisplay(); }
 async function resetClockCurrent(){ const sess=getCurrentSession(); if(!sess) return; const ok=await showModal({ title:'Reset clock', message:'Are you sure you want to reset?', buttons:[{label:'Reset',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if(!ok) return; sess.clock.running=false; sess.clock.elapsedBefore=0; sess.clock.startTimestamp=null; saveAll(); renderClockButtons(); updateClockDisplay(); }
@@ -1068,28 +1079,28 @@ function floatStartClicked(){ const sess=getCurrentSession(); if(!sess){ showToa
 /* ===== GAME float logging ===== */
 async function floatLogClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   const team=sess.teams[state.currentSide];
-  const ev={ id:sess.nextId++, timecode_ms:Math.round(computeSessionElapsedMs(sess)), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
+  const ev={ id:sess.nextId++, timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
   sess.events.push(ev); saveAll(); renderLog(); updatePitcherCountBadges();
   flashElement(floatBtn); showToast('Logged #'+sess.events.length+' - '+msToToastTime(ev.timecode_ms));
 }
 async function floatContactClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   ensureSessionCounters(sess);
   const team=sess.teams[state.currentSide];
-  const ev={ id:sess.nextId++, timecode_ms:Math.round(computeSessionElapsedMs(sess)), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:sess.nextContactId++, play:'' };
+  const ev={ id:sess.nextId++, timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:sess.nextContactId++, play:'' };
   sess.events.push(ev); saveAll(); renderLog(); updatePitcherCountBadges();
   flashElement(floatContactBtn); showToast('Contact #'+ev.contact+' - '+msToToastTime(ev.timecode_ms), 'contact');
 }
 async function floatPlayClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   ensureSessionCounters(sess);
   const team=sess.teams[state.currentSide];
   // Send the log immediately, capturing the timecode at the moment Play is clicked.
-  const ev={ id:sess.nextId++, timecode_ms:Math.round(computeSessionElapsedMs(sess)), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
+  const ev={ id:sess.nextId++, timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
   sess.events.push(ev); saveAll(); renderLog(); updatePitcherCountBadges();
   flashElement(floatPlayBtn); showToast('Play logged #'+sess.events.length+' - '+msToToastTime(ev.timecode_ms), 'play');
   // Then show the pickers and fill this same log with what was picked.
@@ -1118,24 +1129,24 @@ async function floatPlayClicked(){
 async function floatWorkoutClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
   ensureWorkout(sess);
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   if (state.workoutSection==='dash'){
     const dh=sess.workout.dash;
     if (!dh.selectedPlayer){ showToast('Select a runner first'); return; }
-    const ev={ id:dh.nextId++, timecode_ms:Math.round(computeSessionElapsedMs(sess)), player:dh.selectedPlayer, player_id:playerIdFor(sess, dh.selectedPlayer), bad_data:'NO' };
+    const ev={ id:dh.nextId++, timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), player:dh.selectedPlayer, player_id:playerIdFor(sess, dh.selectedPlayer), bad_data:'NO' };
     dh.events.push(ev); saveAll(); renderDashLog();
     flashElement(floatWorkoutBtn); showToast('Logged #'+dh.events.length+' 60YD - '+msToToastTime(ev.timecode_ms), 'store-toast');
   } else if (state.workoutSection==='defense'){
     const d=sess.workout.defense;
     if (!d.selectedPlayer){ showToast('Select a player first'); return; }
     const pos = DEF_POS[d.selectedGroup] || 'OF';
-    const ev={ id:d.nextId++, timecode_ms:Math.round(computeSessionElapsedMs(sess)), player:d.selectedPlayer, player_id:playerIdFor(sess, d.selectedPlayer), position:pos, bad_data:'NO' };
+    const ev={ id:d.nextId++, timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), player:d.selectedPlayer, player_id:playerIdFor(sess, d.selectedPlayer), position:pos, bad_data:'NO' };
     d.events.push(ev); saveAll(); renderDefenseLog();
     flashElement(floatWorkoutBtn); showToast('Logged #'+d.events.filter(e=>e.position===pos).length+' '+pos+' - '+msToToastTime(ev.timecode_ms), 'store-toast');
   } else {
     const b=sess.workout.bp;
     if (!b.selectedPlayer){ showToast('Select a player first'); return; }
-    const ev={ id:b.nextId++, timecode_ms:Math.round(computeSessionElapsedMs(sess)), player:b.selectedPlayer, player_id:playerIdFor(sess, b.selectedPlayer), angle:(b.angle||'S'), bad_data:'NO' };
+    const ev={ id:b.nextId++, timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), player:b.selectedPlayer, player_id:playerIdFor(sess, b.selectedPlayer), angle:(b.angle||'S'), bad_data:'NO' };
     b.events.push(ev); saveAll(); renderBPLog();
     flashElement(floatWorkoutBtn); showToast('Logged #'+b.events.length+' '+ev.angle+' - '+msToToastTime(ev.timecode_ms), 'store-toast');
   }

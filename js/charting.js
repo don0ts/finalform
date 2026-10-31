@@ -322,6 +322,7 @@ let floatState = { left:null, top:null, size:96 };
 const sessionSelect = $('session-select');
 const createSessionBtn = $('create-session-btn');
 const clearLogBtn = $('clear-log-btn');
+const clearAllDataBtn = $('clear-all-data-btn');
 const logSearchInput = $('log-search');
 const logSearchClear = $('log-search-clear');
 const lockFloatsCheckbox = $('lock-floats');
@@ -1197,6 +1198,17 @@ async function ensureClockRunningOrAsk(sess){
   if (!ans) return false;
   sess.clock.running = true; sess.clock.startTimestamp = Date.now(); saveAll(); renderClockButtons(); updateClockDisplay(); return true;
 }
+/* If a log action happens while the clock is stopped, start it from 15s and
+   score that first event at exactly 0:15.000 (15000ms). Returns {autostarted}. */
+function ensureClockForLog(sess){
+  ensureSessionClock(sess);
+  if (sess.clock.running) return { autostarted:false };
+  sess.clock.elapsedBefore = 15000;
+  sess.clock.running = true;
+  sess.clock.startTimestamp = Date.now();
+  saveAll(); renderClockButtons(); updateClockDisplay();
+  return { autostarted:true };
+}
 function startClockCurrent(){ const sess=getCurrentSession(); if(!sess) return; ensureSessionClock(sess); if (sess.clock.running) return; sess.clock.running=true; sess.clock.startTimestamp=Date.now(); saveAll(); renderClockButtons(); updateClockDisplay(); }
 async function pauseClockCurrent(){ const sess=getCurrentSession(); if(!sess) return; ensureSessionClock(sess); const ok=await showModal({ title:'Pause clock', message:'Are you sure you want to pause?', buttons:[{label:'Pause',value:true,className:'btn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if(!ok) return; if (sess.clock.running && sess.clock.startTimestamp) sess.clock.elapsedBefore=computeSessionElapsedMs(sess); sess.clock.running=false; sess.clock.startTimestamp=null; saveAll(); renderClockButtons(); updateClockDisplay(); }
 async function resetClockCurrent(){ const sess=getCurrentSession(); if(!sess) return; const ok=await showModal({ title:'Reset clock', message:'Are you sure you want to reset?', buttons:[{label:'Reset',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if(!ok) return; sess.clock.running=false; sess.clock.elapsedBefore=0; sess.clock.startTimestamp=null; saveAll(); renderClockButtons(); updateClockDisplay(); }
@@ -1208,42 +1220,42 @@ function floatStartClicked(){ const sess=getCurrentSession(); if(!sess){ showToa
 /* ===== GAME float logging ===== */
 async function floatLogClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   const team=sess.teams[state.currentSide];
-  const ev={ id:allocEventId(sess), timecode_ms:Math.round(computeSessionElapsedMs(sess)), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
+  const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:'', play:'' };
   sess.events.push(ev); saveAll(); renderLog(); updatePitcherCountBadges();
   flashElement(floatBtn); showToast('Logged #'+ev.id+' - '+msToToastTime(ev.timecode_ms));
 }
 async function floatContactClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   ensureSessionCounters(sess);
   const team=sess.teams[state.currentSide];
-  const ev={ id:allocEventId(sess), timecode_ms:Math.round(computeSessionElapsedMs(sess)), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:sess.nextContactId++, play:'' };
+  const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), type:'', mph:'', player:team.selectedHitter||'', player_id:playerIdFor(sess, team.selectedHitter), pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess, team.selectedPitcher), bad_data:'NO', notes:{}, contact:sess.nextContactId++, play:'' };
   sess.events.push(ev); saveAll(); renderLog(); updatePitcherCountBadges();
   flashElement(floatContactBtn); showToast('Contact #'+ev.contact+' - '+msToToastTime(ev.timecode_ms), 'contact');
 }
 async function floatWorkoutClicked(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
   ensureWorkout(sess);
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   if (state.workoutSection==='dash'){
     const dh=sess.workout.dash;
     if (!dh.selectedPlayer){ showToast('Select a runner first'); return; }
-    const ev={ id:allocEventId(dh), timecode_ms:Math.round(computeSessionElapsedMs(sess)), player:dh.selectedPlayer, player_id:playerIdFor(sess, dh.selectedPlayer), bad_data:'NO' };
+    const ev={ id:allocEventId(dh), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), player:dh.selectedPlayer, player_id:playerIdFor(sess, dh.selectedPlayer), bad_data:'NO' };
     dh.events.push(ev); saveAll(); renderDashLog();
     flashElement(floatWorkoutBtn); showToast('Logged #'+ev.id+' 60YD - '+msToToastTime(ev.timecode_ms), 'store-toast');
   } else if (state.workoutSection==='defense'){
     const d=sess.workout.defense;
     if (!d.selectedPlayer){ showToast('Select a player first'); return; }
     const pos = DEF_POS[d.selectedGroup] || 'OF';
-    const ev={ id:allocEventId(d), timecode_ms:Math.round(computeSessionElapsedMs(sess)), player:d.selectedPlayer, player_id:playerIdFor(sess, d.selectedPlayer), position:pos, bad_data:'NO' };
+    const ev={ id:allocEventId(d), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), player:d.selectedPlayer, player_id:playerIdFor(sess, d.selectedPlayer), position:pos, bad_data:'NO' };
     d.events.push(ev); saveAll(); renderDefenseLog();
     flashElement(floatWorkoutBtn); showToast('Logged #'+ev.id+' '+pos+' - '+msToToastTime(ev.timecode_ms), 'store-toast');
   } else {
     const b=sess.workout.bp;
     if (!b.selectedPlayer){ showToast('Select a player first'); return; }
-    const ev={ id:allocEventId(b), timecode_ms:Math.round(computeSessionElapsedMs(sess)), player:b.selectedPlayer, player_id:playerIdFor(sess, b.selectedPlayer), angle:(b.angle||'S'), bad_data:'NO' };
+    const ev={ id:allocEventId(b), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))), player:b.selectedPlayer, player_id:playerIdFor(sess, b.selectedPlayer), angle:(b.angle||'S'), bad_data:'NO' };
     b.events.push(ev); saveAll(); renderBPLog();
     flashElement(floatWorkoutBtn); showToast('Logged #'+ev.id+' '+ev.angle+' - '+msToToastTime(ev.timecode_ms), 'store-toast');
   }
@@ -1272,6 +1284,28 @@ function addBPPlayer(raw){
 
 /* ===== clear log (game only) ===== */
 async function clearLog(){ const sess=getCurrentSession(); if(!sess) return; const ok=await showModal({title:'Clear Log',message:'Clear all Game entries for this event?',buttons:[{label:'Clear',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if(!ok) return; sess.events=[]; sess.nextId=1; sess.nextContactId=1; sess.nextPlayId=1; selState.idx=null; selState.whole=false; saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); }
+
+/* ===== clear ALL charting data (local + cloud) ===== */
+async function clearAllData(){
+  const ok=await showModal({ title:'Clear All Data', message:'This permanently deletes ALL charting events, sessions and workout logs on this device AND in the cloud database (ChartingSessions). This cannot be undone. Continue?', buttons:[{label:'Delete Everything',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]});
+  if(!ok) return;
+  if (_syncTimer){ clearTimeout(_syncTimer); _syncTimer=null; }
+  if (_db){
+    try{
+      const snap=await _db.collection(CHARTING_COLLECTION).get();
+      const dels=[]; snap.forEach(doc=>{ dels.push(doc.ref.delete().catch(e=>console.warn('ChartingSessions delete failed', doc.id, e))); });
+      await Promise.all(dels);
+    }catch(e){ console.warn('cloud wipe failed', e); showToast('Local data cleared; cloud wipe failed (check connection/rules)'); }
+  }
+  try{ localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(FLOAT_KEY); }catch(e){}
+  Object.keys(_syncedCache).forEach(k=>delete _syncedCache[k]);
+  _knownSessionIds=new Set();
+  state={ sessions:[], currentSessionId:null, currentSide:'top', compactNames:false, activeTab:'game', workoutSection:'defense' };
+  floatState={ left:null, top:null, size:96 };
+  selState.idx=null; selState.whole=false;
+  renderAll();
+  showToast('All charting data cleared');
+}
 
 /* ===== copy / paste player lists ===== */
 function copyTextToClipboard(text){
@@ -1512,6 +1546,7 @@ createSessionBtn.addEventListener('click', async ()=>{
   const s=buildDefaultSession(nm, dt); state.sessions.push(s); state.currentSessionId=s.id; saveAll(); renderAll();
 });
 clearLogBtn.addEventListener('click', clearLog);
+if (clearAllDataBtn) clearAllDataBtn.addEventListener('click', clearAllData);
 /* Lock Floating Buttons: when checked, floating buttons can't be dragged or resized
    (prevents accidentally moving them instead of tapping on touch devices). */
 if (lockFloatsCheckbox){
@@ -2182,7 +2217,7 @@ async function classifyPitch(ev, geomInzone){
 async function strikeZoneClick(e){
   const sess=getCurrentSession();
   if (!sess){ await showModal({title:'No session',message:'Create/select an event first.',buttons:[{label:'OK',value:true}]}); return; }
-  if (!(await ensureClockRunningOrAsk(sess))) return;
+  const _ck = ensureClockForLog(sess);
   ensureSessionCounters(sess);
   const arect = szArea.getBoundingClientRect();
   const px = Math.max(0, Math.min(100, ((e.clientX - arect.left)/arect.width)*100));
@@ -2193,7 +2228,7 @@ async function strikeZoneClick(e){
   const ny = Math.max(zrect.top, Math.min(e.clientY, zrect.bottom));
   const inzone = Math.hypot(e.clientX-nx, e.clientY-ny) <= r;
   const team=sess.teams[state.currentSide];
-  const ev={ id:allocEventId(sess), timecode_ms:Math.round(computeSessionElapsedMs(sess)),
+  const ev={ id:allocEventId(sess), timecode_ms:(_ck&&_ck.autostarted?15000:Math.round(computeSessionElapsedMs(sess))),
     player:team.selectedHitter||'', player_id:playerIdFor(sess,team.selectedHitter),
     pitcher:team.selectedPitcher||'', pitcher_id:playerIdFor(sess,team.selectedPitcher),
     pitch_x:px, pitch_y:py, inzone:inzone,
