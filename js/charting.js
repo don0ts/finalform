@@ -1651,19 +1651,19 @@ async function pitchGroupVeloModal(ev){
     + '</div>';
   const html = header
     + '<div class="velo-row"><label>Velo (mph)</label><select id="velo-sel">'+veloOptions(curV)+'</select></div>'
-    + '<label class="no-velo"><input type="checkbox" id="no-velo"'+(noVelo?' checked':'')+'/> No Velo Registered <span class="hk">N</span></label>'
+    + '<label class="no-velo"><input type="checkbox" id="no-velo"'+(noVelo?' checked':'')+'/> No Velo Registered</label>'
     + '<div class="sect-lbl">Pitch Group</div>'
     + '<div class="grp-btns">'
-    + PITCH_GROUPS.map(g=>'<button type="button" class="pk grp-pick hollow'+(g===chosen?' selected':'')+'" data-pg="'+g+'">'+PITCH_GROUP_LABEL[g]+' <span class="hk">'+(g==='FB'?'F':g==='BB'?'B':'O')+'</span></button>').join('')
+    + PITCH_GROUPS.map(g=>'<button type="button" class="pk grp-pick submit-btn'+(g===chosen?' selected':'')+'" data-pg="'+g+'" data-resolve="next">'+PITCH_GROUP_LABEL[g]+'</button>').join('')
     + '</div>'
     + miniZone;
-  const p = showModal({ html, buttons:[{label:'Next',value:'next',className:'btn',id:'pgv-next'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
+  const p = showModal({ html, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
   const grpBtns = Array.from(modalRoot.querySelectorAll('[data-pg]'));
   function paintGrp(){ grpBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-pg')===chosen)); }
   grpBtns.forEach(b=> b.addEventListener('click', ()=>{ chosen=b.getAttribute('data-pg'); paintGrp(); }));
   const veloSel = $('velo-sel');
   const noVeloBox = $('no-velo');
-  function syncVelo(){ const off=noVeloBox.checked; noVelo=off; veloSel.disabled=off; const vr=veloSel.closest('.velo-row'); if(vr) vr.classList.toggle('velo-disabled', off); }
+  function syncVelo(){ noVelo=noVeloBox.checked; }
   noVeloBox.addEventListener('change', syncVelo);
   syncVelo();
   let veloBuf='', veloBufTimer=null;
@@ -1681,21 +1681,20 @@ async function pitchGroupVeloModal(ev){
   placeDot();
   chgBtn.addEventListener('click', ()=>{ const show = mzWrap.style.display==='none'; mzWrap.style.display = show?'block':'none'; chgBtn.classList.toggle('on', show); });
   mzArea.addEventListener('click', (e)=>{ const r=mzArea.getBoundingClientRect(); px=Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)); py=Math.max(0,Math.min(100,(e.clientY-r.top)/r.height*100)); inzone=calcInzone(px,py); placeDot(); });
+  function submitGroup(g){ const b=grpBtns.find(x=>x.getAttribute('data-pg')===g); if(b){ chosen=g; paintGrp(); b.click(); } }
   function pgvOnKey(e){
-    const tag=document.activeElement && document.activeElement.tagName;
-    if(e.key==='Enter'){ e.preventDefault(); e.stopPropagation(); const nx=$('pgv-next'); if(nx) nx.click(); return; }
     const k=(e.key||'').toLowerCase();
-    if(tag==='SELECT' && k>='0' && k<='9') return;
+    if(e.key==='Enter'){ e.preventDefault(); submitGroup(chosen||'FB'); return; }
     if(k==='n'){ e.preventDefault(); noVeloBox.checked=!noVeloBox.checked; syncVelo(); }
-    else if(k==='f'){ e.preventDefault(); chosen='FB'; paintGrp(); }
-    else if(k==='b'){ e.preventDefault(); chosen='BB'; paintGrp(); }
-    else if(k==='o'){ e.preventDefault(); chosen='OS'; paintGrp(); }
+    else if(k==='f'){ e.preventDefault(); submitGroup('FB'); }
+    else if(k==='b'){ e.preventDefault(); submitGroup('BB'); }
+    else if(k==='o'){ e.preventDefault(); submitGroup('OS'); }
   }
-  modalRoot.addEventListener('keydown', pgvOnKey);
+  document.addEventListener('keydown', pgvOnKey, true);
   paintGrp();
-  if (!noVeloBox.checked){ setTimeout(()=>{ try{ veloSel.focus(); }catch(e){} }, 0); }
+  setTimeout(()=>{ try{ veloSel.focus(); }catch(e){} }, 0);
   const res = await p;
-  modalRoot.removeEventListener('keydown', pgvOnKey);
+  document.removeEventListener('keydown', pgvOnKey, true);
   if (res!=='next') return null;
   if (!chosen) chosen='FB';
   const velo = noVeloBox.checked ? '' : parseInt(veloSel.value,10);
@@ -1715,10 +1714,10 @@ async function pitchInfoModal(ev, geomInzone){
     + '</div>'
     + '<div class="sect-lbl">Swing Outcome</div>'
     + '<div class="swing-row">'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="InPlay">InPlay <span class="hk">i</span></button>'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="Whiff">Whiff <span class="hk">w</span></button>'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="Take">Take <span class="hk">t</span></button>'
-    +   '<button type="button" class="pk swing-pick hollow" data-sw="Foul">Foul <span class="hk">f</span></button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="InPlay">InPlay</button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="Whiff">Whiff</button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="Take">Take</button>'
+    +   '<button type="button" class="pk swing-pick hollow" data-sw="Foul">Foul</button>'
     + '</div>'
     + '<div class="field-sect" id="field-sect" style="display:none">'
     +   '<div class="muted-note" style="margin:6px 0">Tap where the ball was hit. Behind the plate defaults to C; beyond the fence is a Home Run.</div>'
@@ -1727,8 +1726,8 @@ async function pitchInfoModal(ev, geomInzone){
     + '<div class="sect-lbl">Result</div>'
     + '<div class="result-row">'
     +   '<div class="result-top">'
-    +     '<button type="button" class="pk res-pick hollow" data-res="Strike">Strike</button>'
-    +     '<button type="button" class="pk res-pick hollow" data-res="Ball">Ball</button>'
+    +     '<button type="button" class="pk res-pick hollow submit-btn" data-res="Strike">Strike</button>'
+    +     '<button type="button" class="pk res-pick hollow submit-btn" data-res="Ball">Ball</button>'
     +   '</div>'
     +   '<div class="result-bot">'
     +     '<button type="button" class="pk res-pick hollow submit-btn" data-res="K">K</button>'
@@ -1748,14 +1747,18 @@ async function pitchInfoModal(ev, geomInzone){
   const locxBtns = Array.from(modalRoot.querySelectorAll('input[name=locx]'));
   locxBtns.forEach(b=> b.addEventListener('change', ()=>{ if(b.checked){ locxBtns.forEach(o=>{ if(o!==b) o.checked=false; }); } }));
   function resDisabled(name){
-    if(swingSel==='InPlay') return true;
+    if(!swingSel) return true;                 // grayed by default until a swing is chosen
     if(swingSel==='Whiff') return !(name==='Strike'||name==='K');
-    if(swingSel==='Foul') return name!=='Strike';
-    return false;
+    if(swingSel==='Take') return false;        // Take enables every result
+    return true;                               // InPlay / Foul -> none enabled
   }
   function paintRes(){ resBtns.forEach(b=>{ const dis=resDisabled(b.getAttribute('data-res')); b.disabled=dis; b.classList.toggle('res-off', dis); }); }
   function paintSwing(){ swBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-sw')===swingSel)); fieldSect.style.display=(swingSel==='InPlay')?'block':'none'; paintRes(); }
-  swBtns.forEach(b=> b.addEventListener('click', ()=>{ swingSel=b.getAttribute('data-sw'); paintSwing(); }));
+  swBtns.forEach(b=> b.addEventListener('click', ()=>{
+    const v=b.getAttribute('data-sw');
+    if(v==='Foul'){ swingSel='Foul'; paintSwing(); finish({ location:locVal(), swing:'Foul', ball_strike:'Strike', result:[], pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'' }); return; }
+    swingSel=v; paintSwing();
+  }));
   resBtns.forEach(b=> b.addEventListener('click', ()=>{
     if(b.disabled) return;
     const r=b.getAttribute('data-res');
@@ -1794,20 +1797,40 @@ async function pitchInfoModal(ev, geomInzone){
     finish({ location:locVal(), swing:'InPlay', ball_strike:'Strike', result:[], pa_outcome:bb.pa_outcome, contact_quality:bb.contact_quality, batted_ball:bb.batted_ball, batted_to:bb.batted_to, hit_x:hx, hit_y:hy });
   }
   svgEl.addEventListener('click', (e)=>{ onFieldClick(e.clientX, e.clientY); });
+  // Blue target reticle that tracks the cursor across the field.
+  let reticleEl=null;
+  function ensureReticle(){
+    if(reticleEl) return reticleEl;
+    reticleEl=document.createElementNS(SVGNS,'g'); reticleEl.setAttribute('class','fld-reticle'); reticleEl.setAttribute('pointer-events','none'); reticleEl.style.display='none';
+    const ring=document.createElementNS(SVGNS,'circle'); ring.setAttribute('r','10'); ring.setAttribute('class','fld-reticle-ring');
+    const lh=document.createElementNS(SVGNS,'line'); lh.setAttribute('class','fld-reticle-line');
+    const lv=document.createElementNS(SVGNS,'line'); lv.setAttribute('class','fld-reticle-line');
+    const dot=document.createElementNS(SVGNS,'circle'); dot.setAttribute('r','1.6'); dot.setAttribute('class','fld-reticle-dot');
+    reticleEl.appendChild(ring); reticleEl.appendChild(lh); reticleEl.appendChild(lv); reticleEl.appendChild(dot);
+    svgEl.appendChild(reticleEl);
+    reticleEl._ring=ring; reticleEl._lh=lh; reticleEl._lv=lv; reticleEl._dot=dot;
+    return reticleEl;
+  }
+  function moveReticle(clientX,clientY){ const r=svgEl.getBoundingClientRect(); const sx=(clientX-r.left)/r.width*FIELD_VB_W; const sy=(clientY-r.top)/r.height*FIELD_VB_H; const g=ensureReticle(); g.style.display='block';
+    g._ring.setAttribute('cx',sx); g._ring.setAttribute('cy',sy);
+    g._lh.setAttribute('x1',sx-14); g._lh.setAttribute('y1',sy); g._lh.setAttribute('x2',sx+14); g._lh.setAttribute('y2',sy);
+    g._lv.setAttribute('x1',sx); g._lv.setAttribute('y1',sy-14); g._lv.setAttribute('x2',sx); g._lv.setAttribute('y2',sy+14);
+    g._dot.setAttribute('cx',sx); g._dot.setAttribute('cy',sy);
+  }
+  svgEl.addEventListener('mousemove', (e)=>{ if(!bbOpen) moveReticle(e.clientX,e.clientY); });
+  svgEl.addEventListener('mouseleave', ()=>{ if(reticleEl) reticleEl.style.display='none'; });
   function piOnKey(e){
     if(bbOpen) return;
-    const tag=document.activeElement && document.activeElement.tagName;
-    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT') return;
     const k=(e.key||'').toLowerCase();
     if(k==='i'){ e.preventDefault(); swingSel='InPlay'; paintSwing(); }
     else if(k==='w'){ e.preventDefault(); swingSel='Whiff'; paintSwing(); }
     else if(k==='t'){ e.preventDefault(); swingSel='Take'; paintSwing(); }
-    else if(k==='f'){ e.preventDefault(); swingSel='Foul'; paintSwing(); }
+    else if(k==='f'){ e.preventDefault(); swingSel='Foul'; paintSwing(); finish({ location:locVal(), swing:'Foul', ball_strike:'Strike', result:[], pa_outcome:'', contact_quality:'', batted_ball:'', batted_to:'' }); }
   }
-  modalRoot.addEventListener('keydown', piOnKey);
+  document.addEventListener('keydown', piOnKey, true);
   if(swingSel) paintSwing(); else paintRes();
   const res = await p;
-  modalRoot.removeEventListener('keydown', piOnKey);
+  document.removeEventListener('keydown', piOnKey, true);
   if(res==='__back__') return '__back__';
   if(res==='done' && outcome) return outcome;
   return null;
@@ -1891,12 +1914,12 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
     const title=isHR?'Home Run':'Hit to '+pos;
     const btoOpts=['1','2','3','4','5','6','7','8','9'].map(n=>'<button type="button" class="fp-opt bto-opt'+(n===pickBTo?' on':'')+'" data-v="'+n+'">'+n+' <small>'+NUM_POS[n]+'</small></button>').join('');
     const PA_LIST=(isHR?[['HR','HR','4']]:PA_DEFS);
-    const paOpts=PA_LIST.map(d=>'<button type="button" class="fp-opt pa-opt" data-v="'+d[0]+'">'+d[1]+' <span class="hk">'+d[2]+'</span></button>').join('');
+    const paOpts=PA_LIST.map(d=>'<button type="button" class="fp-opt pa-opt" data-v="'+d[0]+'">'+d[1]+'</button>').join('');
     const popupEl=document.createElement('div'); popupEl.className='field-popup';
     popupEl.innerHTML='<button type="button" class="fp-close" aria-label="Close">\u00d7</button>'
       +'<div class="fp-title">'+title+'</div>'
-      +'<div class="fp-row" id="bb-row"><span>Batted Ball Type</span><div class="fp-pick fp-bb">'+BB_DEFS.map(d=>'<button type="button" class="fp-opt" data-v="'+d[0]+'">'+d[0]+' <span class="hk">'+d[1]+'</span></button>').join('')+'</div></div>'
-      +'<div class="fp-row" id="cq-row" style="display:none"><span>Contact Quality</span><div class="fp-pick fp-cq">'+CQ_DEFS.map(d=>'<button type="button" class="fp-opt" data-v="'+d[0]+'">'+d[0]+' <span class="hk">'+d[1]+'</span></button>').join('')+'</div></div>'
+      +'<div class="fp-row" id="bb-row"><span>Batted Ball Type</span><div class="fp-pick fp-bb">'+BB_DEFS.map(d=>'<button type="button" class="fp-opt" data-v="'+d[0]+'">'+d[0]+'</button>').join('')+'</div></div>'
+      +'<div class="fp-row" id="cq-row" style="display:none"><span>Contact Quality</span><div class="fp-pick fp-cq">'+CQ_DEFS.map(d=>'<button type="button" class="fp-opt" data-v="'+d[0]+'">'+d[0]+'</button>').join('')+'</div></div>'
       +'<div class="fp-row" id="bto-row" style="display:none"><span>Batted To</span><div class="fp-pick fp-bto">'+btoOpts+'</div></div>'
       +'<div class="fp-row" id="pa-row" style="display:none"><span>PA Outcome</span><div class="fp-pick fp-pa">'+paOpts+'</div></div>';
     wrap.appendChild(popupEl);
@@ -1912,7 +1935,7 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy){
     function cleanup(){ document.removeEventListener('keydown',onKey,true); popupEl.remove(); }
     function done(){ cleanup(); resolve({ pa_outcome:pickPA, contact_quality:pickCQ, batted_ball:pickBB, batted_to:pickBTo, homerun:isHR }); }
     function cancel(){ cleanup(); resolve(null); }
-    function pickBBType(v){ pickBB=v; paint(bbWrap,pickBB); if(pickBB==='PU'){ pickCQ='Weak'; paint(cqWrap,pickCQ); } cqRow.style.display='block'; }
+    function pickBBType(v){ pickBB=v; paint(bbWrap,pickBB); cqRow.style.display='block'; if(pickBB==='PU'){ pickCQType('Weak'); } }
     function pickCQType(v){ pickCQ=v; paint(cqWrap,pickCQ); btoRow.style.display='block'; paint(btoWrap,pickBTo); }
     function pickBToVal(v){ pickBTo=v; paint(btoWrap,pickBTo); paRow.style.display='block'; }
     bbWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickBBType(b.getAttribute('data-v'))));
