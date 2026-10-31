@@ -48,9 +48,9 @@ table.stats tbody tr:hover td{background:rgba(56,189,248,.05)}
 tr.detail td{padding:0!important;background:#0b1220}
 .detail-wrap{padding:10px 14px}
 table.detail{width:100%;border-collapse:collapse;min-width:820px}
-table.detail th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.3px;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
-table.detail td{text-align:left;font-size:12px;padding:6px 8px;border-bottom:1px solid rgba(51,65,85,.6);white-space:nowrap}
-table.detail td.left{text-align:left}
+.detail-wrap table.detail th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.3px;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.detail-wrap table.detail td{text-align:left;font-size:12px;padding:6px 8px;border-bottom:1px solid rgba(51,65,85,.6);white-space:nowrap}
+.detail-wrap table.detail td.left{text-align:left}
 .chk{color:#4ade80;font-weight:700}
 .dim{color:#475569}
 .player-head .badge.pbadge{background:rgba(56,189,248,.15);color:var(--accent)}
