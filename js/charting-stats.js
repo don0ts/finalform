@@ -102,7 +102,7 @@ function rowHtml(id,label,r,cls,isYear,ygroup){
 function detailHtml(id,evs,ygroup){
   const grp = ygroup ? ' data-ygdet="'+ygroup+'"' : '';
   let t='<table class="detail"><thead><tr>'
-    +'<th class="c">#</th><th>Pitcher</th><th>Pitch Group</th><th class="c">Velo</th><th>Location</th><th class="c">Swing</th><th class="c">Contact</th><th>Contact Quality</th><th>Batted Ball</th><th class="c">Batted to</th><th>PA Outcome</th></tr></thead><tbody>';
+    +'<th class="c">#</th><th>Pitcher</th><th>Pitch Group</th><th class="c">Velo</th><th>Location</th><th class="c">Swing</th><th class="c">Contact</th><th>Contact Quality</th><th>Batted Ball</th><th class="c">Batted to</th><th class="c">PA Outcome</th></tr></thead><tbody>';
   evs.forEach((e,i)=>{
     t+='<tr><td class="c">'+(i+1)+'</td>'
       +'<td>'+(e.pitcher?esc(e.pitcher)+sideTag(e.throw_side):'<span class="dim">--</span>')+'</td>'
@@ -114,7 +114,7 @@ function detailHtml(id,evs,ygroup){
       +'<td>'+(e.contact_quality||'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.batted_ball?esc(TRAJ_LABEL[e.batted_ball]||e.batted_ball):'<span class="dim">--</span>')+'</td>'
       +'<td class="c">'+(e.batted_to?esc(e.batted_to):'<span class="dim">--</span>')+'</td>'
-      +'<td>'+(e.pa_outcome||(Array.isArray(e.result)&&e.result.length?esc(e.result.join('/')):'')||'<span class="dim">--</span>')+'</td></tr>';
+      +'<td class="c">'+(e.pa_outcome||(Array.isArray(e.result)&&e.result.length?esc(e.result.join('/')):'')||'<span class="dim">--</span>')+'</td></tr>';
   });
   t+='</tbody></table>';
   return '<tr class="detail" id="det_'+id+'"'+grp+' style="display:none"><td colspan="14"><div class="detail-wrap">'+t+'</div></td></tr>';
@@ -262,20 +262,20 @@ function prowHtml(id,label,r,cls,isYear,ygroup){
 function pdetailHtml(id,evs,ygroup){
   const grp = ygroup ? ' data-ygdet="'+ygroup+'"' : '';
   let t='<table class="detail"><thead><tr>'
-    +'<th class="c">#</th><th>Hitter</th><th>Pitch Group</th><th class="c">Velo</th><th>Location</th><th class="c">Ball/Strike</th><th class="c">Swing</th><th class="c">Contact</th><th>Contact Quality</th><th>Batted Ball</th><th class="c">Batted to</th><th>PA Outcome</th></tr></thead><tbody>';
+    +'<th class="c">#</th><th>Hitter</th><th>Pitch Group</th><th class="c">Velo</th><th>Location</th><th>Ball/Strike</th><th class="c">Swing</th><th class="c">Contact</th><th>Contact Quality</th><th>Batted Ball</th><th class="c">Batted to</th><th class="c">PA Outcome</th></tr></thead><tbody>';
   evs.forEach((e,i)=>{
     t+='<tr><td class="c">'+(i+1)+'</td>'
       +'<td>'+(e.player?esc(e.player)+sideTag(e.bat_side):'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.pitch_group?esc(PITCH_GROUP_LABEL[e.pitch_group]||e.pitch_group):'<span class="dim">--</span>')+'</td>'
       +'<td class="c">'+(e.velo||'<span class="dim">--</span>')+'</td>'
       +'<td>'+esc(locText(e))+'</td>'
-      +'<td class="c">'+(e.ball_strike?esc(e.ball_strike):'<span class="dim">--</span>')+'</td>'
+      +'<td>'+(e.ball_strike?esc(e.ball_strike):'<span class="dim">--</span>')+'</td>'
       +'<td class="c">'+(evSwing(e)?'<span class="chk">\u2713</span>':'<span class="dim">--</span>')+'</td>'
       +'<td class="c">'+(evContact(e)?'<span class="chk">\u2713</span>':'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.contact_quality||'<span class="dim">--</span>')+'</td>'
       +'<td>'+(e.batted_ball?esc(TRAJ_LABEL[e.batted_ball]||e.batted_ball):'<span class="dim">--</span>')+'</td>'
       +'<td class="c">'+(e.batted_to?esc(e.batted_to):'<span class="dim">--</span>')+'</td>'
-      +'<td>'+(e.pa_outcome||(Array.isArray(e.result)&&e.result.length?esc(e.result.join('/')):'')||'<span class="dim">--</span>')+'</td></tr>';
+      +'<td class="c">'+(e.pa_outcome||(Array.isArray(e.result)&&e.result.length?esc(e.result.join('/')):'')||'<span class="dim">--</span>')+'</td></tr>';
   });
   t+='</tbody></table>';
   return '<tr class="detail" id="det_'+id+'"'+grp+' style="display:none"><td colspan="25"><div class="detail-wrap">'+t+'</div></td></tr>';
