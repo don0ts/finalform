@@ -842,7 +842,16 @@ async function editPlayersModal(){
   const model=names.map(name=>{
     let id=playerIdFor(sess,name); let hit=null;
     if(id){ hit=_playerCache.find(pl=> String(pl.id)===String(id) || String(pl.docId)===String(id)); }
-    if(!hit){ hit=_playerCache.find(pl=>pl.name && pl.name.toLowerCase()===name.toLowerCase()); }
+    if(!hit){
+      // Name fallback. A profile can live in the DB under more than one doc
+      // (e.g. a temp "p\u2026" doc the measurables tool created while the
+      // player had no ID yet, plus a later real-ID doc). Prefer the record
+      // that actually carries a real numeric Player ID so we edit/clean that
+      // one instead of re-saving the temp doc and leaving a duplicate.
+      const nm=name.toLowerCase();
+      const sameName=_playerCache.filter(pl=>pl.name && pl.name.toLowerCase()===nm);
+      hit = sameName.find(pl=>/^\d+$/.test(String(pl.id))) || sameName[0] || null;
+    }
     if(hit) id=hit.id;
     return { origName:name, name:name, origId:id||'', id:id||'',
       docId: hit?(hit.docId||hit.id):(id||''),
@@ -950,7 +959,19 @@ async function editPlayersModal(){
     if(id) data.player_id=id;
     if(id && _db){
       const ok=await writePlayerDoc(id, data); if(ok) dbWrites++;
-      if(m.origId && String(m.origId)!==String(id)){ try{ await _db.collection(COLLECTION).doc(String(m.origId)).delete(); }catch(e){} }
+      // Canonicalize to one doc keyed by the Player ID (doc id == player_id).
+      // Remove any OTHER doc that represented this same profile so an edit
+      // never leaves a duplicate behind:
+      //  - m.docId: the record's actual Firestore doc id. When it diverges
+      //    from the Player ID (e.g. a temp "p\u2026" doc the measurables tool
+      //    created with an empty player_id), re-saving under the ID would
+      //    otherwise create a second doc and strand the original.
+      //  - m.origId: the player_id the card started with, if it changed.
+      const stale=new Set();
+      if(m.docId && String(m.docId)!==String(id)) stale.add(String(m.docId));
+      if(m.origId && String(m.origId)!==String(id)) stale.add(String(m.origId));
+      for(const sid of stale){ try{ await _db.collection(COLLECTION).doc(sid).delete(); }catch(e){} }
+      m.docId=String(id);
     }
     if(newName!==m.origName){
       renamed++;
