@@ -185,7 +185,8 @@ function profileForm(r){
   var fClass=fieldSelect('Class',r?r.class:'',[''].concat(CLASS_OPTS));
   var fBats=fieldSeg('Bats',r?r.bats:'',['R','L']);
   var fThrows=fieldSeg('Throws',r?r.throws:'',['R','L']);
-  root.appendChild(fName);root.appendChild(fId);root.appendChild(fPos);root.appendChild(fClass);root.appendChild(fBats);root.appendChild(fThrows);
+  var fAgent=fieldText('Agent',r?(r.agent||r.agents||''):'','Agent');
+  root.appendChild(fName);root.appendChild(fId);root.appendChild(fPos);root.appendChild(fClass);root.appendChild(fBats);root.appendChild(fThrows);root.appendChild(fAgent);
   var acts=el('div',{className:'acts'});
   var cancel=el('button',{className:'ghost',textContent:'Cancel'});cancel.addEventListener('click',closeModal);
   var save=el('button',{className:'primary',textContent:isNew?'Create':'Save changes'});
@@ -200,7 +201,8 @@ function profileForm(r){
       position:fPos._input.value||'',
       class:fClass._input.value||'',
       bats:fBats._state.v||'',
-      throws:fThrows._state.v||''
+      throws:fThrows._state.v||'',
+      agent:fAgent._input.value.trim()
     };
     if(!DB||!DB.upsert){ showToast('Not connected to the database',true); return; }
     if(newId!==oldId && rows.some(function(x){return String(x.player_id||x._id||'')===newId;})){

@@ -76,15 +76,25 @@ function startPlayerCacheListener(){
 // kick off the live listener as soon as the DB is ready
 if (_db) startPlayerCacheListener();
 
-// rank search results by how closely a name matches the typed term:
-//   0 = name starts with the term            ("Ye" -> "Yeanderson ...")
-//   1 = a later word in the name starts with it ("Mar" -> "Yenderson Martinez")
-//   2 = term appears somewhere inside the name
+// Normalize a name/term for searching: lowercase and strip accents/diacritics
+// so an accented name matches an unaccented query and vice versa
+// ("josé suarez" <-> "jose suarez").
+function normSearch(s){
+  var x = String(s==null?'':s).toLowerCase();
+  try{ x = x.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){}
+  return x;
+}
+// rank search results by how closely a name matches the typed term. The term
+// may be MULTIPLE words typed in ANY order ("Luis Garcia" matches "Luis Jose
+// Garcia"), and accents are ignored ("jose suarez" matches "José Suárez").
+//   0 = every typed word starts one of the name's words (best, most precise)
+//   1 = the whole term is found as a prefix of a later name word
+//   2 = every typed word appears somewhere inside the name
 // ties within a rank are broken alphabetically (A -> Z).
 function matchRank(name, t){
-  const n = name.toLowerCase();
+  const n = normSearch(name);
   const words = n.split(/\s+/).filter(Boolean);
-  const terms = String(t||'').trim().split(/\s+/).filter(Boolean);
+  const terms = normSearch(t).trim().split(/\s+/).filter(Boolean);
   if (!terms.length) return -1;
   if (terms.length === 1){
     const tt = terms[0];
@@ -622,7 +632,7 @@ async function editPlayersModal(){
     return { origName:name, name:name, origId:id||'', id:id||'',
       docId: hit?(hit.docId||hit.id):(id||''),
       isPitcher: pitchers.includes(name),
-      position:'', cls:'', dob:'', bats:'', throws:'', loaded:false };
+      position:'', cls:'', dob:'', bats:'', throws:'', agent:'', loaded:false };
   });
   // Pull each player's stored profile (parallel) so every card shows its
   // current values in both Legacy and Dropdown views.
@@ -632,7 +642,7 @@ async function editPlayersModal(){
       try{ const doc=await _db.collection(COLLECTION).doc(String(m.docId)).get();
         if(doc && doc.exists){ const d=doc.data()||{};
           m.position=d.position||d.pos||''; m.cls=d.class||d.year||d.grade||'';
-          m.dob=d.dob||d.birthdate||d.birth_date||''; m.bats=(d.bats||d.bat||''); m.throws=(d.throws||d.throw||''); m.loaded=true;
+          m.dob=d.dob||d.birthdate||d.birth_date||''; m.bats=(d.bats||d.bat||''); m.throws=(d.throws||d.throw||''); m.agent=(d.agent||d.agents||''); m.loaded=true;
         }
       }catch(e){}
     }));
@@ -661,6 +671,7 @@ async function editPlayersModal(){
       + '<label>Position<select data-f="position">'+sel(POSITIONS,m.position)+'</select></label>'
       + '<label>Class<select data-f="cls">'+sel(CLASSES,m.cls)+'</select></label>'
       + '<label>Date of birth<input type="date" data-f="dob" value="'+escapeHtml(m.dob)+'"/></label>'
+      + '<label>Agent<input type="text" data-f="agent" value="'+escapeHtml(m.agent)+'"/></label>'
       + '</div>'
       + '<div class="ep-seg-row"><span class="ep-seg-lbl">Bats</span><div class="segtabs" data-seg="bats"><div class="segtab'+(m.bats==="R"?' active':'')+'" data-v="R">R</div><div class="segtab'+(m.bats==="L"?' active':'')+'" data-v="L">L</div></div></div>'
       + '<div class="ep-seg-row"><span class="ep-seg-lbl">Throws</span><div class="segtabs" data-seg="throws"><div class="segtab'+(m.throws==="R"?' active':'')+'" data-v="R">R</div><div class="segtab'+(m.throws==="L"?' active':'')+'" data-v="L">L</div></div></div>'
@@ -721,7 +732,7 @@ async function editPlayersModal(){
   for(const m of model){
     const newName=(m.name||'').trim(); if(!newName) continue;
     const id=(m.id||'').trim();
-    const data={ player_name:newName, position:m.position||'', class:m.cls||'', bats:m.bats||'', throws:m.throws||'', dob:m.dob||'' };
+    const data={ player_name:newName, position:m.position||'', class:m.cls||'', bats:m.bats||'', throws:m.throws||'', dob:m.dob||'', agent:m.agent||'' };
     if(id) data.player_id=id;
     if(id && _db){
       const ok=await writePlayerDoc(id, data); if(ok) dbWrites++;

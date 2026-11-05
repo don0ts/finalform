@@ -83,19 +83,29 @@ function startPlayerCacheListener(){
 // kick off the live listener as soon as the DB is ready
 if (_db) startPlayerCacheListener();
 
+// Normalize a name/term for searching: lowercase and strip accents/diacritics
+// so an accented name matches an unaccented query and vice versa
+// ("josé suarez" <-> "jose suarez"). Also collapses non-alphanumeric
+// separators to single spaces.
+function normSearch(s){
+  var x = String(s==null?'':s).toLowerCase();
+  try{ x = x.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){}
+  return x;
+}
 // rank search results by how closely a name matches the typed term. The
 // term may be MULTIPLE words typed in ANY order: every word must appear in the
 // name (as a word, a word-prefix, or anywhere inside it), regardless of the
 // order the user typed them. So "Luis Garcia" and "Garcia Luis" and just
-// "Garcia" all match "Luis Jose Garcia".
+// "Garcia" all match "Luis Jose Garcia". Accents are ignored, so "jose
+// suarez" matches "José Suárez" and vice versa.
 //   0 = every typed word starts one of the name's words (best, most precise)
 //   1 = the whole term is found as a prefix of a later name word
 //   2 = every typed word appears somewhere inside the name
 // ties within a rank are broken alphabetically (A -> Z).
 function matchRank(name, t){
-  const n = name.toLowerCase();
+  const n = normSearch(name);
   const words = n.split(/\s+/).filter(Boolean);
-  const terms = String(t||'').trim().split(/\s+/).filter(Boolean);
+  const terms = normSearch(t).trim().split(/\s+/).filter(Boolean);
   if (!terms.length) return -1;
   if (terms.length === 1){
     const tt = terms[0];
@@ -114,10 +124,11 @@ function matchRank(name, t){
 // Rank/match players by NAME or by their player_id (from the Firebase "Players"
 // database). An id match ranks: exact / starts-with = 0 (top), contains = 2.
 function matchIdRank(id, t){
-  const s = String(id==null?'':id).toLowerCase();
+  const s = normSearch(id);
+  const tt = normSearch(t);
   if (!s) return -1;
-  if (s===t || s.startsWith(t)) return 0;
-  if (s.indexOf(t) >= 0) return 2;
+  if (s===tt || s.startsWith(tt)) return 0;
+  if (s.indexOf(tt) >= 0) return 2;
   return -1;
 }
 function searchPlayers(term){
@@ -1633,7 +1644,7 @@ async function resolvePlayerForData(sess, name){
       }
     }catch(e){}
   }
-  return { id:String(id), bats:bats, throws:throws };
+  return { id:String(id), docId:String(docId), bats:bats, throws:throws };
 }
 async function exportDataCsv(){
   const sess=getCurrentSession();
@@ -1645,7 +1656,7 @@ async function exportDataCsv(){
   for(const p of roster){
     const r=await resolvePlayerForData(sess, p.name);
     if(!r) continue; // skip players without a player id
-    players.push({ name:p.name, pitcher:p.pitcher, id:r.id, bats:r.bats, throws:r.throws });
+    players.push({ name:p.name, pitcher:p.pitcher, id:r.id, docId:r.docId, bats:r.bats, throws:r.throws });
   }
   if(!players.length){ return showModal({title:'No players with IDs',message:'The Data CSV only includes players that have a Player ID. None of the current players have one \u2014 add IDs in Edit Players first.',buttons:[{label:'OK',value:true}]}); }
   const listRows=players.map(p=>'<li>'+escapeHtml(p.name)+' <small style="color:var(--muted)">(ID '+escapeHtml(p.id)+')</small></li>').join('');
@@ -1661,7 +1672,31 @@ async function exportDataCsv(){
   const tmId=($('dc-tm-id')?$('dc-tm-id').value.trim():'');
   const tod=($('dc-tod')?$('dc-tod').value:'');
   downloadCsv(sanitizeEventName(sess.name)+'_Data.csv', buildDataCsv(sess, players, tmId, tod));
+  // Stamp the Status page: each exported player (all have a Player ID) gets a
+  // "Trackman" last-date-taken tag set to this session's date, so it shows up
+  // on the Status page exactly like a Save-to-Status from the data-entry tool.
+  await stampDataCsvStatus(sess, players);
   showToast('Data CSV exported');
+}
+// Write status.Trackman = session date (mm/dd/yyyy) for every exported player.
+function sessDateToMDY(d){
+  var m=String(d||'').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(m) return m[2]+'/'+m[3]+'/'+m[1];
+  var m2=String(d||'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(m2) return ('0'+m2[1]).slice(-2)+'/'+('0'+m2[2]).slice(-2)+'/'+m2[3];
+  return '';
+}
+async function stampDataCsvStatus(sess, players){
+  if(!_db || !players || !players.length) return;
+  const mdy=sessDateToMDY(sess.date);
+  if(!mdy) return;
+  let n=0;
+  for(const p of players){
+    const docId=p.docId||p.id;
+    if(docId==null || docId==='') continue;
+    try{ await _db.collection(COLLECTION).doc(String(docId)).set({status:{Trackman:mdy}}, {merge:true}); n++; }catch(e){}
+  }
+  if(n) showToast('Status updated \u2022 '+n+' player'+(n!==1?'s':'')+' (Trackman '+mdy+')');
 }
 
 /* ===== wire up ===== */

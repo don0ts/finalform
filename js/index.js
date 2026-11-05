@@ -364,6 +364,7 @@ function addPlayerFull(opt){
   p._throws=opt.throws||'';
   p._class=opt.cls||'';
   p._dob=opt.dob||'';
+  p._agent=opt.agent||'';
   players.push(p); current=players.length-1;
   persistEvents(); renderSavedEvents(activeIdx); updateGate();
   renderPlayers(); renderForm();
@@ -390,6 +391,8 @@ function promptAddPlayer(){
     '<select id="mAddClass" '+selStyle+'>'+classOpts+'</select>'+
     '<label style="display:block;font-size:12px;color:var(--muted);font-weight:600;margin:12px 0 6px 2px">Date of birth</label>'+
     '<input id="mAddDob" type="date" style="width:100%;box-sizing:border-box;background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:10px 12px;font-size:14px;color-scheme:dark">'+
+    '<label style="display:block;font-size:12px;color:var(--muted);font-weight:600;margin:12px 0 6px 2px">Agent</label>'+
+    '<input id="mAddAgent" type="text" placeholder="Enter agent" '+inpStyle+'>'+
     '<label class="check" style="margin-top:12px;display:inline-flex"><input type="checkbox" id="mPitcher"><span>Pitcher?</span></label>'+
     '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px"><button class="ghost" id="mAddCancel">Cancel</button><button class="primary" id="mAddOk">Add player</button></div>');
   const inp=document.getElementById('mAddName'); if(inp) inp.focus();
@@ -410,6 +413,7 @@ function promptAddPlayer(){
     sel.pos=(d.position&&d.position!=='P')?d.position:'';
     sel.bats=d.bats||''; sel.throws=d.throws||''; sel.class=(d['class']||'')+'';
     const dobEl=document.getElementById('mAddDob'); if(dobEl) dobEl.value=d.dob||'';
+    const agEl=document.getElementById('mAddAgent'); if(agEl) agEl.value=(d.agent||d.agents||'');
     const pitEl=document.getElementById('mPitcher'); if(pitEl) pitEl.checked=(d.position==='P');
     if(clsEl) clsEl.value=sel.class;
     document.querySelectorAll('#modal .segtab').forEach(x=>{ const g=x.getAttribute('data-g'); x.classList.toggle('active', x.getAttribute('data-v')===sel[g]); });
@@ -437,6 +441,7 @@ function promptAddPlayer(){
     const nm=titleCaseStr((document.getElementById('mAddName').value||'').trim());
     const id=(document.getElementById('mAddId').value||'').trim();
     const dob=((document.getElementById('mAddDob')||{}).value||'').trim();
+    const agent=((document.getElementById('mAddAgent')||{}).value||'').trim();
     const pit=document.getElementById('mPitcher').checked;
     // If this player is already in the current event (matched by Player ID Cubs, or
     // by name when no ID is given), edit that existing entry instead of adding a duplicate.
@@ -459,12 +464,13 @@ function promptAddPlayer(){
       if(sel.throws) p._throws=sel.throws;
       if(sel.class) p._class=sel.class;
       if(dob) p._dob=dob;
+      if(agent) p._agent=agent;
       current=existingIdx;
       persistEvents(); renderSavedEvents(activeIdx); updateGate();
       renderPlayers(); renderForm();
       showToast('Updated existing player');
     } else {
-      addPlayerFull({name:nm,id:id,pos:pit?'':sel.pos,bats:sel.bats,throws:sel.throws,pitcher:pit,cls:sel.class,dob:dob});
+      addPlayerFull({name:nm,id:id,pos:pit?'':sel.pos,bats:sel.bats,throws:sel.throws,pitcher:pit,cls:sel.class,dob:dob,agent:agent});
     }
   };
   document.getElementById('mAddCancel').addEventListener('click',closeModal);
@@ -493,7 +499,7 @@ function blankPlayer(){
   Object.keys(DEFAULTS).forEach(k=>{o[+k]=DEFAULTS[k];});
   o._pid='p'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
   o._dev={trackman:false,blast:false,forceplate:false,blastNum:'',trackmanTxt:'',forceplateTxt:'',blastR:false,blastL:false,blastTxt:'',blastTxtR:'',blastTxtL:''};
-  o._bats='';o._throws='';o._class='';o._dob='';
+  o._bats='';o._throws='';o._class='';o._dob='';o._agent='';
   return o;
 }
 function labelize(name){
@@ -1108,7 +1114,7 @@ function _backfillPlayer(mp, op){
     if(k.charAt(0)==='_') return;
     if(_isBlankCell(mp[k]) && !_isBlankCell(op[k])) mp[k]=op[k];
   });
-  ['_class','_bats','_throws','_dob'].forEach(function(k){ if(_isBlankCell(mp[k]) && !_isBlankCell(op[k])) mp[k]=op[k]; });
+  ['_class','_bats','_throws','_dob','_agent'].forEach(function(k){ if(_isBlankCell(mp[k]) && !_isBlankCell(op[k])) mp[k]=op[k]; });
   if(op._dev){
     if(!mp._dev) mp._dev={};
     Object.keys(op._dev).forEach(function(k){
@@ -1676,7 +1682,8 @@ function playerToDoc(p){
     class:p._class||'',
     bats:p._bats||'',
     throws:p._throws||'',
-    dob:p._dob||''
+    dob:p._dob||'',
+    agent:p._agent||''
   };
 }
 // The Firestore document is keyed by the player's ACTUAL ID (Player ID Cubs).
@@ -1742,6 +1749,7 @@ function patchProfileFromDoc(p,d){
   if(String(p._bats||'')!==String(d.bats||'')){ p._bats=d.bats||''; ch=true; }
   if(String(p._throws||'')!==String(d.throws||'')){ p._throws=d.throws||''; ch=true; }
   if(String(p._dob||'')!==String(d.dob||'')){ p._dob=d.dob||''; ch=true; }
+  if(String(p._agent||'')!==String(d.agent||d.agents||'')){ p._agent=d.agent||d.agents||''; ch=true; }
   return ch;
 }
 function applyDbToRoster(){
@@ -1922,12 +1930,13 @@ function setDeviceLink(p,devKey,on){
     // Reclaim an existing row for this player whose linkPid was stale/foreign
     // (so a synced profile re-ticks onto its own row instead of duplicating).
     if(!dp){ dp=arr.find(x=>_sameDevIdentity(p,x,devKey)); if(dp) dp.linkPid=pid; }
-    if(!dp){ dp={linkPid:pid,name:'',cubsId:'',id:'',accountName:'',accountNumber:'',bats:'',throws:'',tod:getEventTod()}; arr.push(dp); }
+    if(!dp){ dp={linkPid:pid,name:'',cubsId:'',id:'',accountName:'',accountNumber:'',agent:'',bats:'',throws:'',tod:getEventTod()}; arr.push(dp); }
     dp.name=playerName(p);
     dp.cubsId=(PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'';
     dp.id=data.ids[devKey]||'';
     dp.bats=p._bats||dp.bats||'';
     dp.throws=p._throws||dp.throws||'';
+    dp.agent=p._agent||dp.agent||'';
     dp.accountName=(p._dev&&p._dev[devKey+'Txt'])||playerName(p);
   } else {
     // Remove every row that belongs to this player (matched by link OR identity)
@@ -1955,7 +1964,7 @@ function syncBlast(p){
   hands.forEach(h=>{
     arr.push({linkPid:pid, hand:h, name:playerName(p), cubsId:(PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'',
       id:data.ids.blast||'', accountName:(function(){var _v=(p._dev['blastTxt'+h]||p._dev.blastTxt||'');return _v!==''?('Intl '+_v):'';})(),
-      accountNumber:'', bats:h, throws:p._throws||'', tod:getEventTod()});
+      accountNumber:'', agent:p._agent||'', bats:h, throws:p._throws||'', tod:getEventTod()});
   });
 }
 function syncLinkedNames(p){
@@ -1963,7 +1972,7 @@ function syncLinkedNames(p){
   const data=ensureData(events[activeIdx]);
   ['trackman','forceplate','timinggates','dynamo'].forEach(dk=>{
     const dp=data.devices[dk].players.find(x=>x.linkPid===p._pid);
-    if(dp){ dp.name=playerName(p); dp.cubsId=(PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||''; dp.bats=p._bats||dp.bats||''; dp.throws=p._throws||dp.throws||''; dp.accountName=(p._dev&&p._dev[dk+'Txt'])||playerName(p); }
+    if(dp){ dp.name=playerName(p); dp.cubsId=(PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||''; dp.bats=p._bats||dp.bats||''; dp.throws=p._throws||dp.throws||''; dp.agent=p._agent||dp.agent||''; dp.accountName=(p._dev&&p._dev[dk+'Txt'])||playerName(p); }
   });
   syncBlast(p);
   if(mode==='data') renderDataEntry();
@@ -2306,6 +2315,8 @@ function openEditPlayersPopup(){
     grid.appendChild(deSelect('Class',CLS,p._class||'',function(v){ p._class=v; commit(); }));
     // Date of birth (picker)
     grid.appendChild(deDate('Date of birth',p._dob||'',function(v){ p._dob=v; commit(); }));
+    // Agent
+    grid.appendChild(deField('Agent',p._agent||'',function(v){ p._agent=v; commit(); }));
     wrap.appendChild(grid);
     // Bats / Throws
     wrap.appendChild(deSeg('Bats',['R','L'],p._bats||'',function(v){ p._bats=v; commit(); }));
@@ -2404,6 +2415,7 @@ function devPlayerCard(dev,dp,i,data,arr){
   grid.appendChild(deField('Device ID',dp.id,function(v){dp.id=v;persistEvents();}));
   grid.appendChild(deField('Account Name',dp.accountName,function(v){dp.accountName=v;persistEvents();}));
   grid.appendChild(deField('Account Number',dp.accountNumber,function(v){dp.accountNumber=v;persistEvents();}));
+  grid.appendChild(deField('Agent',dp.agent,function(v){dp.agent=v;persistEvents();}));
   body.appendChild(grid);
   body.appendChild(deSeg('Bats',['R','L'],dp.bats,function(v){dp.bats=v;persistEvents();}));
   body.appendChild(deSeg('Throws',['R','L'],dp.throws,function(v){dp.throws=v;persistEvents();}));
@@ -2433,6 +2445,7 @@ function promptAddDevicePlayer(){
   const accW=document.createElement('div');accW.appendChild(fieldLabel('Account Name'));const accEl=txtInput('');accW.appendChild(accEl);
   const accNW=document.createElement('div');accNW.appendChild(fieldLabel('Account Number'));const accNEl=txtInput('');accNW.appendChild(accNEl);
   grid.appendChild(idW);grid.appendChild(accW);grid.appendChild(accNW);
+  const agW=document.createElement('div');agW.appendChild(fieldLabel('Agent'));const agEl=txtInput('');agW.appendChild(agEl);grid.appendChild(agW);
   root.appendChild(grid);
   // segtabs bats/throws/tod
   const sel={bats:'',throws:'',tod:getEventTod()};
@@ -2490,6 +2503,7 @@ function promptAddDevicePlayer(){
       idEl.value=(PIDCUBS_IDX!==undefined?match[PIDCUBS_IDX]:'')||'';
       if(match._bats){ sel.bats=match._bats; }
       if(match._throws){ sel.throws=match._throws; }
+      if(match._agent){ agEl.value=match._agent; }
       root.querySelectorAll('.segtabs').forEach(r=>{ const g=r.dataset.group; if(!g)return; r.querySelectorAll('.segtab').forEach(x=>x.classList.toggle('active',x.textContent===sel[g])); });
     }
   });
@@ -2510,12 +2524,14 @@ function promptAddDevicePlayer(){
         (hands.length?hands:['']).forEach(h=>{
           arr.push({linkPid:null,name:nm,cubsId:(idEl.value||'').trim(),id:data.ids.blast||'',
             accountName:(h==='R'?blast.txtR:h==='L'?blast.txtL:'')||'',accountNumber:(accNEl.value||'').trim(),
+            agent:(agEl.value||'').trim(),
             bats:h||sel.bats,throws:sel.throws,tod:sel.tod||getEventTod(),hand:h||undefined});
           added++;
         });
       } else {
         arr.push({linkPid:null,name:nm,cubsId:(idEl.value||'').trim(),id:data.ids[dev.idKey]||'',
           accountName:accName,accountNumber:(accNEl.value||'').trim(),
+          agent:(agEl.value||'').trim(),
           bats:sel.bats,throws:sel.throws,tod:sel.tod||getEventTod()});
         added++;
       }
