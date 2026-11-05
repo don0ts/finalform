@@ -62,7 +62,7 @@ function startPlayerCacheListener(){
   try {
     _db.collection(COLLECTION).onSnapshot(
       snap => {
-        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id), bats:(data.bats||data.bat||''), throws:(data.throws||data.throw||'') }; });
+        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id), bats:(data.bats||data.bat||''), throws:(data.throws||data.throw||''), position:(data.position||data.pos||''), cls:(data.class||data.year||data.grade||''), agent:(data.agent||data.agents||'') }; });
         list.sort((a,b)=> a.name.localeCompare(b.name));
         _playerCache = list; _playerCache._listening = true;
         _playerCacheReady = true; _playerCacheError = false;
@@ -83,17 +83,32 @@ function startPlayerCacheListener(){
 // kick off the live listener as soon as the DB is ready
 if (_db) startPlayerCacheListener();
 
-// rank search results by how closely a name matches the typed term:
-//   0 = name starts with the term            ("Ye" -> "Yeanderson ...")
-//   1 = a later word in the name starts with it ("Mar" -> "Yenderson Martinez")
-//   2 = term appears somewhere inside the name
+// rank search results by how closely a name matches the typed term. The
+// term may be MULTIPLE words typed in ANY order: every word must appear in the
+// name (as a word, a word-prefix, or anywhere inside it), regardless of the
+// order the user typed them. So "Luis Garcia" and "Garcia Luis" and just
+// "Garcia" all match "Luis Jose Garcia".
+//   0 = every typed word starts one of the name's words (best, most precise)
+//   1 = the whole term is found as a prefix of a later name word
+//   2 = every typed word appears somewhere inside the name
 // ties within a rank are broken alphabetically (A -> Z).
 function matchRank(name, t){
   const n = name.toLowerCase();
-  if (n.startsWith(t)) return 0;
-  const words = n.split(/\s+/);
-  for (let i=1;i<words.length;i++){ if (words[i].startsWith(t)) return 1; }
-  if (n.indexOf(t) >= 0) return 2;
+  const words = n.split(/\s+/).filter(Boolean);
+  const terms = String(t||'').trim().split(/\s+/).filter(Boolean);
+  if (!terms.length) return -1;
+  if (terms.length === 1){
+    const tt = terms[0];
+    if (n.startsWith(tt)) return 0;
+    for (let i=1;i<words.length;i++){ if (words[i].startsWith(tt)) return 1; }
+    if (n.indexOf(tt) >= 0) return 2;
+    return -1;
+  }
+  // Multi-word term: order-independent. Each typed word must match a name word.
+  const allWordPrefix = terms.every(term => words.some(w => w.startsWith(term)));
+  if (allWordPrefix) return 0;
+  const allSubstring = terms.every(term => n.indexOf(term) >= 0);
+  if (allSubstring) return 2;
   return -1;
 }
 // Rank/match players by NAME or by their player_id (from the Firebase "Players"
@@ -233,6 +248,12 @@ function attachPlayerSearch(input, onPick){
       const nm = document.createElement('span'); nm.textContent = p.name;
       const idl = document.createElement('span'); idl.className='psid'; idl.textContent = 'ID: ' + p.id;
       b.appendChild(nm); b.appendChild(idl);
+      // Show position / class / agent as extra info on each suggestion.
+      const meta = [];
+      const pos = p.position || ''; if (pos) meta.push('Pos: ' + pos);
+      const cls = p.cls || ''; if (cls) meta.push('Class: ' + cls);
+      const ag  = p.agent || ''; if (ag) meta.push('Agent: ' + ag);
+      if (meta.length){ const ml = document.createElement('span'); ml.className='psmeta'; ml.textContent = meta.join(' \u00b7 '); b.appendChild(ml); }
       if (i===active) b.classList.add('active');
       b.addEventListener('mousedown', (e)=>{ e.preventDefault(); choose(p); });
       box.appendChild(b);
@@ -746,15 +767,21 @@ async function openOptionsModal(index){
     + '<select id="modal-pitcher" style="padding:8px;border-radius:8px;border:1px solid var(--soft-border)">'
     + allPitchers.map(p=>'<option value="'+escapeHtml(p)+'"'+(ev.pitcher===p?' selected':'')+'>'+escapeHtml(p)+'</option>').join('')
     + '</select>'
+    + '<label style="font-size:13px;color:var(--muted)">Pitch Type</label>'
+    + '<select id="modal-pitchgroup" style="padding:8px;border-radius:8px;border:1px solid var(--soft-border)">'
+    + PITCH_GROUPS.map(g=>'<option value="'+g+'"'+(g===(ev.pitch_group||'')?' selected':'')+'>'+PITCH_GROUP_LABEL[g]+'</option>').join('')
+    + '</select>'
     + '<div style="display:flex;gap:10px;align-items:center;margin-top:6px">'
     + '<label><input type="checkbox" id="modal-late"'+((ev.notes&&ev.notes.late)?' checked':'')+' /> Late Input</label>'
     + '<label><input type="checkbox" id="modal-early"'+((ev.notes&&ev.notes.early)?' checked':'')+' /> Early Input</label>'
     + '</div></div>';
   const res = await showModal({ title:'Options', html, buttons:[{label:'Save',value:'save',className:'btn'},{label:'Edit Play',value:'editplay',className:'btn'},{label:'Delete',value:'delete',className:'btn warn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
   if (res==='cancel' || !res) return;
-  if (res==='editplay'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); ev.bat_side=batSideFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); ev.throw_side=throwSideFor(sess,pp); } await classifyPitch(ev, ev.inzone); ev.contact = evContact(ev)?(ev.contact||1):''; ev.play = evPlayLabel(ev); ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
+  // Read the pitch type chosen in this modal (falls back to the stored value).
+  function chosenPitchGroup(){ const el=$('modal-pitchgroup'); return el?el.value:(ev.pitch_group||''); }
+  if (res==='editplay'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); ev.bat_side=batSideFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); ev.throw_side=throwSideFor(sess,pp); } ev.pitch_group=chosenPitchGroup(); await classifyPitch(ev, ev.inzone); ev.contact = evContact(ev)?(ev.contact||1):''; ev.play = evPlayLabel(ev); ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
   if (res==='delete'){ const c = await showModal({ title:'Delete entry?', message:'Delete this log entry?', buttons:[{label:'Delete',value:true,className:'btn warn'},{label:'Cancel',value:false,className:'btn ghost'}]}); if (!c) return; sess.events.splice(index,1); selState.idx=null; selState.whole=false; saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
-  if (res==='save'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); ev.bat_side=batSideFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); ev.throw_side=throwSideFor(sess,pp); } ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
+  if (res==='save'){ const hh=$('modal-hitter').value, pp=$('modal-pitcher').value, late=$('modal-late').checked, early=$('modal-early').checked; if(hh){ ev.player=hh; ev.player_id=playerIdFor(sess,hh); ev.bat_side=batSideFor(sess,hh); } if(pp){ ev.pitcher=pp; ev.pitcher_id=playerIdFor(sess,pp); ev.throw_side=throwSideFor(sess,pp); } ev.pitch_group=chosenPitchGroup(); ev.notes={late,early}; ev.bad_data = late?'YES_LATE':(early?'YES_EARLY':'YES_FIX'); saveAll(); renderLog(); renderStrikeZone(); renderSzDesc(); updatePitcherCountBadges(); return; }
 }
 
 /* ===== PLAY-level options modal (edits last play + applies matchup to all pitches in the card) ===== */
@@ -827,7 +854,7 @@ async function playerExistsInDb(id){
   try{ const doc=await _db.collection(COLLECTION).doc(String(id)).get(); return !!(doc && doc.exists); }
   catch(e){ return false; }
 }
-let _epMenuMode='legacy';
+let _epMenuMode='dropdown';
 async function editPlayersModal(){
   const sess=getCurrentSession(); if(!sess){ await showModal({title:'Edit Players', message:'Start or select a session first.'}); return; }
   try{ await loadPlayerCache(); }catch(e){}
@@ -856,7 +883,7 @@ async function editPlayersModal(){
     return { origName:name, name:name, origId:id||'', id:id||'',
       docId: hit?(hit.docId||hit.id):(id||''),
       isPitcher: pitchers.includes(name),
-      position:'', cls:'', dob:'', bats:'', throws:'', loaded:false };
+      position:'', cls:'', dob:'', bats:'', throws:'', agent:'', loaded:false };
   });
   // Pull each player's stored profile (parallel) so every card shows its
   // current values in both Legacy and Dropdown views.
@@ -866,7 +893,7 @@ async function editPlayersModal(){
       try{ const doc=await _db.collection(COLLECTION).doc(String(m.docId)).get();
         if(doc && doc.exists){ const d=doc.data()||{};
           m.position=d.position||d.pos||''; m.cls=d.class||d.year||d.grade||'';
-          m.dob=d.dob||d.birthdate||d.birth_date||''; m.bats=(d.bats||d.bat||''); m.throws=(d.throws||d.throw||''); m.loaded=true;
+          m.dob=d.dob||d.birthdate||d.birth_date||''; m.bats=(d.bats||d.bat||''); m.throws=(d.throws||d.throw||''); m.agent=(d.agent||d.agents||''); m.loaded=true;
         }
       }catch(e){}
     }));
@@ -875,7 +902,6 @@ async function editPlayersModal(){
   const dbNote = _db? '' : '<div class="muted-note" style="color:var(--pitch-red)">Database offline \u2014 the lineup will update, but no profile is written.</div>';
   const html='<div class="ep-root">'
     + '<div class="ep-head"><div class="ep-toggle">'
-    +   '<label class="ep-tg"><input type="checkbox" id="ep-mode-legacy"/> Legacy</label>'
     +   '<label class="ep-tg"><input type="checkbox" id="ep-mode-dropdown"/> Dropdown</label>'
     + '</div></div>'
     + dbNote
@@ -883,9 +909,9 @@ async function editPlayersModal(){
     + '</div>';
   const p=showModal({ title:'Edit Players', html, buttons:[{label:'Save',value:'save',className:'btn'},{label:'Cancel',value:'cancel',className:'btn ghost'}] });
   const listWrap=$('ep-list');
-  const cbLegacy=$('ep-mode-legacy'), cbDrop=$('ep-mode-dropdown');
+  const cbDrop=$('ep-mode-dropdown');
   let ddSel=0;
-  function paintToggle(){ cbLegacy.checked=(_epMenuMode==='legacy'); cbDrop.checked=(_epMenuMode==='dropdown'); }
+  function paintToggle(){ if(cbDrop) cbDrop.checked=(_epMenuMode==='dropdown'); }
   function cardHtml(m,i,withTitle){
     return '<div class="ep-card" data-mi="'+i+'">'
       + (withTitle?'<div class="ep-card-title">'+escapeHtml(m.name||('Player '+(i+1)))+(m.isPitcher?' \u00b7 P':'')+'</div>':'')
@@ -894,6 +920,7 @@ async function editPlayersModal(){
       + '<label>ID (Player ID Cubs)<input type="text" data-f="id" value="'+escapeHtml(m.id)+'"/></label>'
       + '<label>Position<select data-f="position">'+sel(POSITIONS,m.position)+'</select></label>'
       + '<label>Class<select data-f="cls">'+sel(CLASSES,m.cls)+'</select></label>'
+      + '<label>Agent<input type="text" data-f="agent" value="'+escapeHtml(m.agent||'')+'" placeholder="Agent name\u2026"/></label>'
       + '<label>Date of birth<input type="date" data-f="dob" value="'+escapeHtml(m.dob)+'"/></label>'
       + '</div>'
       + '<div class="ep-seg-row"><span class="ep-seg-lbl">Bats</span><div class="segtabs" data-seg="bats"><div class="segtab'+(m.bats==="R"?' active':'')+'" data-v="R">R</div><div class="segtab'+(m.bats==="L"?' active':'')+'" data-v="L">L</div></div></div>'
@@ -943,8 +970,7 @@ async function editPlayersModal(){
       listWrap.querySelectorAll('.ep-card').forEach(wireCard);
     }
   }
-  cbLegacy.addEventListener('change', ()=>{ _epMenuMode='legacy'; renderList(); });
-  cbDrop.addEventListener('change', ()=>{ _epMenuMode='dropdown'; renderList(); });
+  if(cbDrop) cbDrop.addEventListener('change', ()=>{ _epMenuMode='dropdown'; renderList(); });
   renderList();
   const res=await p;
   if(res!=='save') return;
@@ -955,7 +981,7 @@ async function editPlayersModal(){
   for(const m of model){
     const newName=(m.name||'').trim(); if(!newName) continue;
     const id=(m.id||'').trim();
-    const data={ player_name:newName, position:m.position||'', class:m.cls||'', bats:m.bats||'', throws:m.throws||'', dob:m.dob||'' };
+    const data={ player_name:newName, position:m.position||'', class:m.cls||'', bats:m.bats||'', throws:m.throws||'', dob:m.dob||'', agent:m.agent||'' };
     if(id) data.player_id=id;
     if(id && _db){
       const ok=await writePlayerDoc(id, data); if(ok) dbWrites++;

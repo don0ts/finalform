@@ -46,6 +46,7 @@ function computeMergedDoc(selected){
     bats:(primary.bats||pick('bats'))||'',
     throws:(primary.throws||pick('throws'))||'',
     dob:(primary.dob||pick('dob'))||'',
+    agent:(primary.agent||primary.agents||pick('agent')||pick('agents'))||'',
     status:mergeStatus(selected)
   };
 }
@@ -149,7 +150,7 @@ function render(){
     c.appendChild(top);
     var kv=el('div',{className:'kv'});
     function add(label,val){kv.appendChild(el('b',{textContent:label}));kv.appendChild(el('span',{textContent:val||'\u2014'}));}
-    add('ID',r.player_id||r._id);add('Class',r.class);add('Bats',r.bats);add('Throws',r.throws);add('DOB',r.dob);
+    add('ID',r.player_id||r._id);add('Class',r.class);add('Bats',r.bats);add('Throws',r.throws);add('DOB',r.dob);add('Agent',r.agent||r.agents);
     c.appendChild(kv);
     var wrap=el('div',{className:'rowacts'});
     var eb=el('button',{className:'ghost',textContent:'Edit'});eb.addEventListener('click',function(){openEdit(r);});
@@ -212,7 +213,10 @@ function profileForm(r){
   var fBats=fieldSeg('Bats',r?r.bats:'',['R','L']);
   var fThrows=fieldSeg('Throws',r?r.throws:'',['R','L']);
   var fDob=fieldDate('Date of birth',r?r.dob:'');
+  var fAgent=fieldText('Agent',r?(r.agent||r.agents||''):'','Agent name');
   root.appendChild(fName);root.appendChild(fId);root.appendChild(fPos);root.appendChild(fClass);root.appendChild(fBats);root.appendChild(fThrows);root.appendChild(fDob);
+  root.appendChild(el('div',{textContent:'Agent'},'font-size:12px;font-weight:800;letter-spacing:.4px;color:var(--muted);margin:8px 0 4px;text-transform:uppercase'));
+  root.appendChild(fAgent);
   var acts=el('div',{className:'acts'});
   var cancel=el('button',{className:'ghost',textContent:'Cancel'});cancel.addEventListener('click',closeModal);
   var save=el('button',{className:'primary',textContent:isNew?'Create':'Save changes'});
@@ -228,7 +232,8 @@ function profileForm(r){
       class:fClass._input.value||'',
       bats:fBats._state.v||'',
       throws:fThrows._state.v||'',
-      dob:fDob._input.value||''
+      dob:fDob._input.value||'',
+      agent:fAgent._input.value||''
     };
     if(!DB){ showToast('Not connected to the database',true); return; }
     // duplicate-id guard when creating or changing the ID

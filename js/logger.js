@@ -83,10 +83,21 @@ if (_db) startPlayerCacheListener();
 // ties within a rank are broken alphabetically (A -> Z).
 function matchRank(name, t){
   const n = name.toLowerCase();
-  if (n.startsWith(t)) return 0;
-  const words = n.split(/\s+/);
-  for (let i=1;i<words.length;i++){ if (words[i].startsWith(t)) return 1; }
-  if (n.indexOf(t) >= 0) return 2;
+  const words = n.split(/\s+/).filter(Boolean);
+  const terms = String(t||'').trim().split(/\s+/).filter(Boolean);
+  if (!terms.length) return -1;
+  if (terms.length === 1){
+    const tt = terms[0];
+    if (n.startsWith(tt)) return 0;
+    for (let i=1;i<words.length;i++){ if (words[i].startsWith(tt)) return 1; }
+    if (n.indexOf(tt) >= 0) return 2;
+    return -1;
+  }
+  // Multi-word term: order-independent. Each typed word must match a name word.
+  const allWordPrefix = terms.every(term => words.some(w => w.startsWith(term)));
+  if (allWordPrefix) return 0;
+  const allSubstring = terms.every(term => n.indexOf(term) >= 0);
+  if (allSubstring) return 2;
   return -1;
 }
 function searchPlayers(term){

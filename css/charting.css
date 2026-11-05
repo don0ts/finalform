@@ -248,6 +248,7 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:6px}
 .player-suggest button{background:transparent;border:0;color:#eaf6ff;text-align:left;padding:8px 10px;border-radius:7px;font-weight:600;font-size:13px;cursor:pointer;display:flex;flex-direction:column;gap:2px}
 .player-suggest button:hover,.player-suggest button.active{background:rgba(79,157,255,0.14)}
 .player-suggest .psid{font-size:11px;color:var(--muted);font-weight:600}
+.player-suggest .psmeta{font-size:11px;color:#8fb6d9;font-weight:600;opacity:.85}
 .player-suggest .psnote{padding:8px 10px;color:var(--muted);font-size:12px}
 
 /* ===== Pitcher/Player quick-select card ===== */
