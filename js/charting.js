@@ -608,7 +608,18 @@ function msToLabel(ms){ const total = Math.floor(ms); const minutes = Math.floor
 function updateClockDisplay(){ const sess = getCurrentSession(); clockDisplay.textContent = sess ? msToLabel(computeSessionElapsedMs(sess)) : '00:00.000'; }
 function renderClockButtons(){ const sess = getCurrentSession(); if (!sess){ startBtn.disabled=true; pauseBtn.disabled=true; return; } ensureSessionClock(sess); startBtn.disabled = !!sess.clock.running; pauseBtn.disabled = !sess.clock.running; }
 
-function renderSessionSelect(){ sessionSelect.innerHTML=''; state.sessions.forEach(s=>{ const opt = document.createElement('option'); opt.value=s.id; opt.textContent = s.name + ' - ' + (s.date||''); sessionSelect.appendChild(opt); }); if (state.currentSessionId) sessionSelect.value = state.currentSessionId; }
+function renderSessionSelect(){ sessionSelect.innerHTML=''; sessionsNewestFirst().forEach(s=>{ const opt = document.createElement('option'); opt.value=s.id; opt.textContent = s.name + ' - ' + (s.date||''); sessionSelect.appendChild(opt); }); if (state.currentSessionId) sessionSelect.value = state.currentSessionId; }
+// Events ordered NEWEST date first; undated events fall to the end. Returns a
+// sorted COPY so state.sessions order (and every index into it) is untouched.
+function sessionsNewestFirst(){
+  return (state.sessions||[]).slice().sort((a,b)=>{
+    const ka=String(a.date||''), kb=String(b.date||'');
+    if(ka&&kb){ if(ka<kb) return 1; if(ka>kb) return -1; return 0; }
+    if(ka&&!kb) return -1;
+    if(!ka&&kb) return 1;
+    return 0;
+  });
+}
 
 /* ===== GAME: pitcher count ===== */
 function countPitcherEvents(sess, pitcherName){ if (!sess || !sess.events) return 0; return sess.events.filter(e => e.pitcher === pitcherName).length; }
@@ -2075,13 +2086,25 @@ async function pitchGroupVeloModal(ev){
     + '<label class="no-velo"><input type="checkbox" id="no-velo"'+(noVelo?' checked':'')+'/> No Velo Registered</label>'
     + '<div class="sect-lbl">Pitch Group</div>'
     + '<div class="grp-btns">'
-    + PITCH_GROUPS.map(g=>'<button type="button" class="pk grp-pick submit-btn'+(g===chosen?' selected':'')+'" data-pg="'+g+'" data-resolve="next">'+PITCH_GROUP_LABEL[g]+'</button>').join('')
+    + PITCH_GROUPS.map(g=>'<button type="button" class="pk grp-pick submit-btn'+(g===chosen?' selected':'')+'" data-pg="'+g+'">'+PITCH_GROUP_LABEL[g]+'</button>').join('')
     + '</div>'
-    + miniZone;
+    + miniZone
+    + '<button type="button" data-resolve="next" id="pgv-next" style="display:none"></button>';
   const p = showModal({ html, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
+  // When the modal opened (used to swallow a touch ghost-click).
+  const _pgvOpenedAt = Date.now();
   const grpBtns = Array.from(modalRoot.querySelectorAll('[data-pg]'));
   function paintGrp(){ grpBtns.forEach(b=> b.classList.toggle('selected', b.getAttribute('data-pg')===chosen)); }
-  grpBtns.forEach(b=> b.addEventListener('click', ()=>{ chosen=b.getAttribute('data-pg'); paintGrp(); }));
+  const pgvNext = $('pgv-next');
+  // Record the chosen pitch group FIRST, then close the modal. The visible
+  // group buttons no longer carry data-resolve, so the generic close handler
+  // can't fire before `chosen` is set.
+  function commitGroup(g){ chosen=g; paintGrp(); if(pgvNext) pgvNext.click(); }
+  // Ghost-click guard: on a touch device the strike-zone tap that opened this
+  // modal fires a synthetic click ~300ms later on whatever button is now under
+  // the finger. Ignore group taps within 350ms of opening so a stray tap can't
+  // close the modal on the default group (Fastball).
+  grpBtns.forEach(b=> b.addEventListener('click', (e)=>{ if(Date.now()-_pgvOpenedAt < 350){ e.preventDefault(); e.stopPropagation(); return; } commitGroup(b.getAttribute('data-pg')); }));
   const zoneBtns = Array.from(modalRoot.querySelectorAll('[data-zone]'));
   function paintZone(){ zoneBtns.forEach(b=> b.classList.toggle('selected', (b.getAttribute('data-zone')==='in')===inzone)); }
   zoneBtns.forEach(b=> b.addEventListener('click', ()=>{ inzone=(b.getAttribute('data-zone')==='in'); paintZone(); placeDot(); }));
@@ -2107,7 +2130,7 @@ async function pitchGroupVeloModal(ev){
   placeDot();
   chgBtn.addEventListener('click', ()=>{ const show = mzWrap.style.display==='none'; mzWrap.style.display = show?'block':'none'; chgBtn.classList.toggle('on', show); });
   mzArea.addEventListener('click', (e)=>{ const r=mzArea.getBoundingClientRect(); px=Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)); py=Math.max(0,Math.min(100,(e.clientY-r.top)/r.height*100)); inzone=calcInzone(px,py); placeDot(); paintZone(); });
-  function submitGroup(g){ const b=grpBtns.find(x=>x.getAttribute('data-pg')===g); if(b){ chosen=g; paintGrp(); b.click(); } }
+  function submitGroup(g){ commitGroup(g); }
   function pgvOnKey(e){
     const k=(e.key||'').toLowerCase();
     if(e.key>='0' && e.key<='9'){ e.preventDefault(); feedVeloDigit(e.key); return; }

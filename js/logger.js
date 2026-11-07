@@ -480,7 +480,18 @@ function msToLabel(ms){ const total = Math.floor(ms); const minutes = Math.floor
 function updateClockDisplay(){ const sess = getCurrentSession(); clockDisplay.textContent = sess ? msToLabel(computeSessionElapsedMs(sess)) : '00:00.000'; }
 function renderClockButtons(){ const sess = getCurrentSession(); if (!sess){ startBtn.disabled=true; pauseBtn.disabled=true; return; } ensureSessionClock(sess); startBtn.disabled = !!sess.clock.running; pauseBtn.disabled = !sess.clock.running; }
 
-function renderSessionSelect(){ sessionSelect.innerHTML=''; state.sessions.forEach(s=>{ const opt = document.createElement('option'); opt.value=s.id; opt.textContent = s.name + ' - ' + (s.date||''); sessionSelect.appendChild(opt); }); if (state.currentSessionId) sessionSelect.value = state.currentSessionId; }
+function renderSessionSelect(){ sessionSelect.innerHTML=''; sessionsNewestFirst().forEach(s=>{ const opt = document.createElement('option'); opt.value=s.id; opt.textContent = s.name + ' - ' + (s.date||''); sessionSelect.appendChild(opt); }); if (state.currentSessionId) sessionSelect.value = state.currentSessionId; }
+// Events ordered NEWEST date first; undated events fall to the end. Returns a
+// sorted COPY so state.sessions order (and every index into it) is untouched.
+function sessionsNewestFirst(){
+  return (state.sessions||[]).slice().sort((a,b)=>{
+    const ka=String(a.date||''), kb=String(b.date||'');
+    if(ka&&kb){ if(ka<kb) return 1; if(ka>kb) return -1; return 0; }
+    if(ka&&!kb) return -1;
+    if(!ka&&kb) return 1;
+    return 0;
+  });
+}
 
 /* ===== GAME: pitcher count ===== */
 function countPitcherEvents(sess, pitcherName){ if (!sess || !sess.events) return 0; return sess.events.filter(e => e.pitcher === pitcherName).length; }

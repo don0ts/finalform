@@ -67,12 +67,12 @@ function renderSavedEvents(sel){
   const blank=document.createElement('option');blank.value='';
   blank.textContent=events.length?'-- select saved event --':'(no saved events yet)';
   dd.appendChild(blank);
-  // Show events ordered by date (oldest first); undated events fall to the end.
+  // Show events ordered by date (NEWEST first); undated events fall to the end.
   // Option values stay the ORIGINAL array index so activeIdx and every other
   // index reference keep working regardless of display order.
   const order=events.map((ev,i)=>i).sort((a,b)=>{
     const ka=mdyToISO(events[a].date||''), kb=mdyToISO(events[b].date||'');
-    if(ka&&kb){ if(ka<kb) return -1; if(ka>kb) return 1; }
+    if(ka&&kb){ if(ka<kb) return 1; if(ka>kb) return -1; }
     else if(ka&&!kb) return -1;
     else if(!ka&&kb) return 1;
     return a-b; // stable tie-break by original order
