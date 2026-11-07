@@ -26,6 +26,7 @@ let eventDate='';
 
 // ---- events (each event owns its own list of players; persisted locally) ----
 const EVENTS_KEY='measurables_events_v2';
+const ACTIVE_EVT_KEY='measurables_active_event_v1'; // remembers the last selected event across refreshes
 let events=[];      // [{name,date,players:[...]}]
 let activeIdx=-1;   // index of the active event, -1 = none
 let players=[];     // reference to events[activeIdx].players
@@ -61,6 +62,12 @@ function persistEvents(){
   if(hasActiveEvent() && players[current]) scheduleDBSync(players[current]);
   if(_popupSearchClear){ try{ _popupSearchClear(); }catch(e){} }
 }
+// A stable identifier for an event so the last selection survives a refresh
+// even if the array order changes (prefer the DB doc id, else the computed id).
+function eventStableKey(ev){ if(!ev) return ''; return ev._dbId ? ('db:'+ev._dbId) : ('doc:'+eventDocId(ev)); }
+function rememberActiveEvent(){ try{ if(hasActiveEvent()) localStorage.setItem(ACTIVE_EVT_KEY, eventStableKey(events[activeIdx])); }catch(e){} }
+function forgetActiveEvent(){ try{ localStorage.removeItem(ACTIVE_EVT_KEY); }catch(e){} }
+function findEventByStableKey(key){ if(!key) return -1; for(var i=0;i<events.length;i++){ if(eventStableKey(events[i])===key) return i; } return -1; }
 function renderSavedEvents(sel){
   const dd=document.getElementById('savedEvents'); if(!dd) return;
   dd.innerHTML='';
@@ -194,6 +201,7 @@ function setActiveEvent(i){
   ensureData(ev);
   const todEl=document.getElementById('eventTod'); if(todEl) todEl.value=ev.data.tod||'Morning';
   renderSavedEvents(i);
+  rememberActiveEvent();
   updateGate();
   renderPlayers();
   renderForm();
@@ -1067,6 +1075,7 @@ document.getElementById('savedEvents').addEventListener('change',function(){
   if(v===''){
     // '-- select saved event --' chosen: deselect and hide all content
     activeIdx=-1; players=[]; eventDate='';
+    forgetActiveEvent();
     document.getElementById('eventDate').value=''; document.getElementById('eventName').value='';
     updateGate(); renderPlayers(); renderForm(); renderDataEntry();
     return;
@@ -1087,6 +1096,7 @@ function confirmDeleteEvent(i){
     events.splice(i,1);
     if(activeIdx===i){
       activeIdx=-1; players=[]; eventDate='';
+      forgetActiveEvent();
       document.getElementById('eventDate').value=''; document.getElementById('eventName').value='';
     } else if(activeIdx>i){ activeIdx--; }
     persistEvents();
@@ -2603,5 +2613,5 @@ if(typeof document!=='undefined' && document.addEventListener){
     }
   });
 }
-if(events.length){ setActiveEvent(0); }
+if(events.length){ var _restoreIdx=findEventByStableKey((function(){ try{ return localStorage.getItem(ACTIVE_EVT_KEY); }catch(e){ return null; } })()); setActiveEvent(_restoreIdx>=0?_restoreIdx:0); }
 else { updateGate(); renderPlayers(); renderForm(); }
