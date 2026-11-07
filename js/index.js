@@ -97,6 +97,12 @@ function renderSavedEvents(sel){
 // every saved event is reachable, AND keep already-known events in sync: when a
 // DB event we already have locally changes on another device (e.g. its player
 // list grows), refresh our copy so the update actually shows up here.
+// Events whose DB doc we just deleted (e.g. via a merge). A full-collection
+// onSnapshot can briefly re-deliver a deleted doc while the delete propagates;
+// this guard stops applyDbEvents from resurrecting such a source, and expires
+// after a short window so a genuinely re-created event is not blocked forever.
+var _recentlyRemovedEvents={};
+function _isRecentlyRemoved(id){ var t=_recentlyRemovedEvents[id]; return !!t && (Date.now()-t)<30000; }
 function applyDbEvents(list){
   if(!Array.isArray(list)) return;
   var changed=false;       // local events changed -> persist + refresh dropdown
@@ -105,6 +111,12 @@ function applyDbEvents(list){
   // Don't fight the user while a popup editor (Edit Players / Tech) is open.
   var ov=document.getElementById('overlay'), ov2=document.getElementById('overlay2');
   var popupOpen=(ov&&ov.classList.contains('show'))||(ov2&&ov2.classList.contains('show'));
+  // IDs present in this server snapshot. Used to (a) stop pruning anything the
+  // DB still has, and (b) clear a recently-removed guard once the delete has
+  // actually propagated (the doc no longer comes back in the snapshot).
+  var incomingIds={};
+  list.forEach(function(d){ var id=d&&(d.event_id||d._id); if(id) incomingIds[id]=1; });
+  Object.keys(_recentlyRemovedEvents).forEach(function(id){ if(!incomingIds[id] || !_isRecentlyRemoved(id)) delete _recentlyRemovedEvents[id]; });
   list.forEach(function(docu){
     var id=docu&&(docu.event_id||docu._id); if(!id) return;
     // Find an existing local event tracking this DB doc id.
@@ -123,7 +135,10 @@ function applyDbEvents(list){
     var incoming=(parsed&&typeof parsed==='object')?parsed:{name:docu.name||'',date:docu.date||'',players:[]};
     if(!Array.isArray(incoming.players)) incoming.players=[];
     if(idx<0){
-      // Brand-new event from another device -> add it.
+      // Brand-new event from another device -> add it. But if this id was just
+      // merged/deleted here, skip it so a delete that is still propagating can't
+      // resurrect the source event we intentionally removed.
+      if(_isRecentlyRemoved(id)) return;
       incoming._dbId=id; incoming._fromDb=true;
       events.push(incoming); changed=true;
       return;
@@ -166,6 +181,28 @@ function applyDbEvents(list){
       activeChanged=true;
     }
   });
+  // Prune local events whose DB document is gone from this server snapshot
+  // (e.g. a source event merged/deleted on this or another device). This runs
+  // only against a real server snapshot; events never saved to the DB (no
+  // _dbId) are left untouched, and the active event is never yanked out from
+  // under an open editor / focused field.
+  for(var pdi=events.length-1;pdi>=0;pdi--){
+    var pev=events[pdi];
+    if(!pev._dbId || incomingIds[pev._dbId]) continue;
+    var pActive=(activeIdx===pdi);
+    if(pActive && (popupOpen || isFormFieldFocused())) continue;
+    events.splice(pdi,1);
+    changed=true;
+    if(pActive){
+      activeIdx=-1; players=[]; eventDate=''; current=0;
+      forgetActiveEvent();
+      var _dtEl=document.getElementById('eventDate'); if(_dtEl) _dtEl.value='';
+      var _nmEl=document.getElementById('eventName'); if(_nmEl) _nmEl.value='';
+      activeChanged=true;
+    } else if(pdi<activeIdx){
+      activeIdx--;
+    }
+  }
   if(changed){
     try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
     renderSavedEvents(hasActiveEvent()?activeIdx:undefined);
@@ -1352,6 +1389,10 @@ function doEventMerge(selected, name, date){
   if(EVENT_IDX>=0) merged.players.forEach(function(p){ p[EVENT_IDX]=date; });
   var srcDbIds=[]; selected.forEach(function(ev){ if(ev._dbId) srcDbIds.push(ev._dbId); });
   var hadDb=srcDbIds.length>0;
+  // Guard against the full-collection onSnapshot re-adding a source doc while
+  // its delete is still propagating (the old bug: the merged-away source came
+  // back and was never pruned, so it co-existed with the merged event forever).
+  srcDbIds.forEach(function(id){ _recentlyRemovedEvents[id]=Date.now(); });
   events=events.filter(function(e){ return selected.indexOf(e)<0; });
   events.push(merged);
   setActiveEvent(events.length-1);
@@ -1657,6 +1698,7 @@ document.getElementById('toggleHeader').addEventListener('click',()=>{
   document.getElementById('toggleHeader').textContent=headerHidden?'Show':'Hide';
 });
 document.getElementById('deAddPlayer').addEventListener('click',promptAddDevicePlayer);
+(function(){var _dm=document.getElementById('deMergePlayers'); if(_dm) _dm.addEventListener('click',openMergePlayersPopup);})();
 
 // ---- Data Entry (device metadata) ----
 const DEVICES=[
@@ -2088,7 +2130,7 @@ function renderDevLinks(){
   const p=players[current];
   if(!p._dev) p._dev=blankDev();
   const actions=document.createElement('div');actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px';
-  [['Yards',openYardsPopup],['Defense',openDefensePopup],['Measurables',openMeasurablesPopup],['Tech',openTechPopup],['Edit Players',openEditPlayersPopup]].forEach(a=>{
+  [['Yards',openYardsPopup],['Defense',openDefensePopup],['Measurables',openMeasurablesPopup],['Tech',openTechPopup],['Edit Players',openEditPlayersPopup],['Merge Players',openMergePlayersPopup]].forEach(a=>{
     const b=document.createElement('button');b.className='ghost';b.textContent=a[0];b.addEventListener('click',a[1]);actions.appendChild(b);
   });
   box.appendChild(actions);
@@ -2300,6 +2342,91 @@ function deSelect(label,opts,val,onCh){
   s.addEventListener('change',function(){onCh(s.value);});
   w.appendChild(lb);w.appendChild(s);return w;
 }
+// ---- Merge Players (roster) ----
+// Mirror of the Profiles-page merge, but over the CURRENT event roster: pick 2+
+// players, the first pick is the primary (its details are the defaults), data
+// from every selected player is combined (blank cells back-filled, device/tech
+// rows re-linked onto the kept player), and the source players are removed so a
+// single merged player remains. No cross-collection lookup — IDs/names come only
+// from the players being merged.
+function playerMergeLabel(p){
+  var id=(PIDCUBS_IDX!==undefined?((p[PIDCUBS_IDX]||'')+''):'').trim();
+  var nm=playerName(p)||'(unnamed)';
+  var pit=(PITCHER_IDX!==undefined&&p[PITCHER_IDX]===true);
+  var pos=pit?'P':((POS&&p[POS.field])?String(p[POS.field]):'');
+  return (id?(id+' \u2013 '):'')+nm+(pos?(' ('+pos+')'):'');
+}
+// Searchable dropdown over the roster; remembers the chosen player's array index.
+function buildRosterMergeSelect(preIdx){
+  var wrap=elItem('div',{},'position:relative;flex:1;min-width:0');
+  var input=document.createElement('input');input.type='text';input.placeholder='Search by ID, name or position\u2026';input.autocomplete='off';
+  input.style.cssText='width:100%;background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:9px 11px;font-size:14px;box-sizing:border-box';
+  var menu=elItem('div',{},'position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;background:var(--panel2);border:1px solid var(--line);border-radius:8px;max-height:240px;overflow:auto;display:none;box-shadow:0 12px 30px rgba(0,0,0,.45)');
+  var state={idx:-1}; var onChangeCb=null;
+  function pick(i){ state.idx=i; input.value=playerMergeLabel(players[i]); menu.style.display='none'; if(onChangeCb) onChangeCb(); }
+  function open(filter){
+    menu.innerHTML=''; var q=(filter||'').toLowerCase(); var any=false;
+    players.forEach(function(p,i){
+      var lab=playerMergeLabel(p);
+      if(q && lab.toLowerCase().indexOf(q)<0) return;
+      any=true;
+      var it=elItem('div',{textContent:lab},'padding:9px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--line)');
+      it.addEventListener('mousedown',function(ev){ ev.preventDefault(); pick(i); });
+      it.addEventListener('mouseenter',function(){ it.style.background='rgba(56,189,248,.10)'; });
+      it.addEventListener('mouseleave',function(){ it.style.background=''; });
+      menu.appendChild(it);
+    });
+    if(!any) menu.appendChild(elItem('div',{textContent:'No matches'},'padding:10px 12px;color:var(--muted);font-size:13px'));
+    menu.style.display='block';
+  }
+  input.addEventListener('focus',function(){ open(state.idx>=0?'':input.value); });
+  input.addEventListener('input',function(){ state.idx=-1; open(input.value); });
+  input.addEventListener('blur',function(){ setTimeout(function(){ menu.style.display='none'; },160); });
+  wrap.appendChild(input);wrap.appendChild(menu);
+  var api={node:wrap, getIdx:function(){ return state.idx; }, setIdx:function(i){ if(i>=0&&i<players.length) pick(i); }, onChange:function(fn){ onChangeCb=fn; }, _tag:null};
+  if(preIdx!=null && preIdx>=0) api.setIdx(preIdx);
+  return api;
+}
+function openMergePlayersPopup(){
+  if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
+  if(players.length<2){ showToast('Need at least two players to merge'); return; }
+  var root=elItem('div');
+  root.appendChild(elItem('h3',{textContent:'Merge players'},'margin:0 0 4px;font-size:18px'));
+  root.appendChild(elItem('p',{textContent:'Pick the players to merge. The first pick is the primary \u2014 the merged player defaults to its details. Data and device entries from every selected player are combined, and the source players are removed from the roster.'},'margin:0 0 14px;color:var(--muted);font-size:13px'));
+  var holder=elItem('div'); var selects=[];
+  function relabel(){ selects.forEach(function(s,i){ if(s._tag) s._tag.textContent=(i===0?'Primary':('#'+(i+1))); }); }
+  function addRow(preIdx){
+    var msel=buildRosterMergeSelect(preIdx);
+    var line=elItem('div',{},'display:flex;gap:8px;align-items:center;margin-bottom:10px');
+    var tag=elItem('span',{textContent:(selects.length===0?'Primary':('#'+(selects.length+1)))},'min-width:58px;font-size:12px;color:var(--muted);font-weight:700');
+    var rm=elItem('button',{className:'ghost',textContent:'\u2715'},'padding:6px 10px');
+    rm.addEventListener('click',function(){
+      var i=selects.indexOf(msel); if(i<0) return;
+      if(selects.length<=2){ showToast('Keep at least two players'); return; }
+      selects.splice(i,1); holder.removeChild(line); relabel();
+    });
+    line.appendChild(tag); line.appendChild(msel.node); line.appendChild(rm);
+    msel._tag=tag; holder.appendChild(line); selects.push(msel);
+  }
+  var first=(typeof current==='number' && current>=0 && current<players.length)?current:0;
+  addRow(first); addRow(-1);
+  root.appendChild(holder);
+  var addWrap=elItem('div',{},'margin:2px 0 8px');
+  var addAnother=elItem('button',{className:'ghost',textContent:'+ Add another player'});
+  addAnother.addEventListener('click',function(){ addRow(-1); });
+  addWrap.appendChild(addAnother); root.appendChild(addWrap);
+  var acts=elItem('div',{},'display:flex;gap:10px;justify-content:flex-end;margin-top:18px');
+  var cancel=elItem('button',{className:'ghost',textContent:'Cancel'}); cancel.addEventListener('click',closeModal);
+  var go=elItem('button',{className:'primary',textContent:'Merge'});
+  go.addEventListener('click',function(){
+    var seen={},uniq=[];
+    selects.forEach(function(s){ var i=s.getIdx(); if(i>=0 && !seen[i]){ seen[i]=1; uniq.push(i); } });
+    if(uniq.length<2){ showToast('Select at least two different players'); return; }
+    mergePlayersConfirm(uniq.map(function(i){ return players[i]; }));
+  });
+  acts.appendChild(cancel); acts.appendChild(go); root.appendChild(acts);
+  openModalNode(root);
+}
 function openEditPlayersPopup(){
   // Same fields as the Profiles page editor: Name, ID, Position, Class, Bats, Throws.
   var POSN=['','P','C','1B','2B','3B','SS','IF','LF','CF','RF','OF','DH','UTIL'];
@@ -2333,6 +2460,97 @@ function openEditPlayersPopup(){
     wrap.appendChild(deSeg('Throws',['R','L'],p._throws||'',function(v){ p._throws=v; commit(); }));
     return wrap;
   });
+}
+function mergePlayersConfirm(selectedPlayers){
+  var POSN=['','P','C','1B','2B','3B','SS','IF','LF','CF','RF','OF','DH','UTIL'];
+  var CLS=[''];for(var y=2016;y<=2037;y++)CLS.push(String(y));
+  var primary=selectedPlayers[0];
+  function pickProp(k){ for(var i=0;i<selectedPlayers.length;i++){ var v=selectedPlayers[i][k]; if(!_isBlankCell(v)) return v; } return ''; }
+  function pickCell(idx){ for(var i=0;i<selectedPlayers.length;i++){ var v=selectedPlayers[i][idx]; if(!_isBlankCell(v)) return v; } return ''; }
+  var primaryPit=(PITCHER_IDX!==undefined&&primary[PITCHER_IDX]===true);
+  var curPos=primaryPit?'P':((POS&&primary[POS.field])?String(primary[POS.field]):'');
+  if(!curPos){ for(var si=0;si<selectedPlayers.length;si++){ var sp=selectedPlayers[si]; if(PITCHER_IDX!==undefined&&sp[PITCHER_IDX]===true){ curPos='P'; break; } if(POS&&sp[POS.field]){ curPos=String(sp[POS.field]); break; } } }
+  var state={
+    name:((NAME_IDX!==undefined?(primary[NAME_IDX]||pickCell(NAME_IDX)):'')||''),
+    id:((PIDCUBS_IDX!==undefined?(primary[PIDCUBS_IDX]||pickCell(PIDCUBS_IDX)):'')||'')+'',
+    pos:curPos||'',
+    cls:primary._class||pickProp('_class')||'',
+    dob:primary._dob||pickProp('_dob')||'',
+    agent:primary._agent||pickProp('_agent')||'',
+    bats:primary._bats||pickProp('_bats')||'',
+    throws:primary._throws||pickProp('_throws')||''
+  };
+  var root=elItem('div');
+  root.appendChild(elItem('h3',{textContent:'Confirm merged player'},'margin:0 0 4px;font-size:18px'));
+  root.appendChild(elItem('p',{textContent:selectedPlayers.length+' players will become one. Details default to the primary \u2014 edit them below before confirming. Measurement and device data is combined, with blanks filled from the other players.'},'margin:0 0 12px;color:var(--muted);font-size:13px'));
+  var srcBox=elItem('div',{},'margin:0 0 14px;padding:10px 12px;background:#0b1220;border:1px solid var(--line);border-radius:8px');
+  selectedPlayers.forEach(function(p,i){ srcBox.appendChild(elItem('div',{textContent:(i===0?'Primary \u2192  ':'merge   \u2192  ')+playerMergeLabel(p)},'font-size:12px;color:var(--muted);padding:3px 0;font-weight:'+(i===0?'700':'400'))); });
+  root.appendChild(srcBox);
+  var grid=elItem('div',{className:'grid'});
+  grid.appendChild(deField('Name',state.name,function(v){ state.name=v; }));
+  grid.appendChild(deField('ID (Player ID Cubs)',state.id,function(v){ state.id=v; }));
+  grid.appendChild(deSelect('Position',POSN,state.pos,function(v){ state.pos=v; }));
+  grid.appendChild(deSelect('Class',CLS,state.cls,function(v){ state.cls=v; }));
+  grid.appendChild(deDate('Date of birth',state.dob,function(v){ state.dob=v; }));
+  grid.appendChild(deField('Agent',state.agent,function(v){ state.agent=v; }));
+  root.appendChild(grid);
+  root.appendChild(deSeg('Bats',['R','L'],state.bats,function(v){ state.bats=v; }));
+  root.appendChild(deSeg('Throws',['R','L'],state.throws,function(v){ state.throws=v; }));
+  var acts=elItem('div',{},'display:flex;gap:10px;justify-content:flex-end;margin-top:18px');
+  var cancel=elItem('button',{className:'ghost',textContent:'Cancel'}); cancel.addEventListener('click',closeModal);
+  var go=elItem('button',{className:'primary',textContent:'Merge players'});
+  go.addEventListener('click',function(){ go.disabled=true; doPlayerMerge(selectedPlayers, state); });
+  acts.appendChild(cancel); acts.appendChild(go); root.appendChild(acts);
+  openModalNode(root);
+}
+function doPlayerMerge(selectedPlayers, f){
+  if(!hasActiveEvent()){ closeModal(); return; }
+  var primary=selectedPlayers[0];
+  var sources=selectedPlayers.slice(1);
+  // 1) Back-fill blank cells / profile props / device flags on the primary from
+  //    each source (the primary's own values always win).
+  sources.forEach(function(sp){ _backfillPlayer(primary, sp); });
+  // 2) Re-link every device/tech row from the sources onto the primary's _pid,
+  //    then drop duplicate non-blast rows (blast is rebuilt per hand below), so
+  //    captured data lands on the one kept player instead of being lost.
+  ensurePid(primary);
+  var data=ensureData(events[activeIdx]);
+  var srcPids={}; sources.forEach(function(sp){ if(sp._pid) srcPids[sp._pid]=1; });
+  ['trackman','blast','forceplate','timinggates','dynamo'].forEach(function(dk){
+    var dev=data.devices[dk]; if(!dev) return;
+    var arr=dev.players||[];
+    arr.forEach(function(x){ if(x.linkPid!=null && srcPids[x.linkPid]) x.linkPid=primary._pid; });
+    if(dk!=='blast'){
+      var kept=[], saw=false;
+      for(var i=0;i<arr.length;i++){ var x=arr[i]; if(x.linkPid===primary._pid){ if(saw) continue; saw=true; } kept.push(x); }
+      dev.players=kept;
+    }
+  });
+  // 3) Apply the confirmed profile fields to the primary.
+  if(NAME_IDX!==undefined) primary[NAME_IDX]=(f.name||'');
+  if(PIDCUBS_IDX!==undefined) primary[PIDCUBS_IDX]=(f.id||'');
+  if(f.pos==='P'){ if(PITCHER_IDX!==undefined) primary[PITCHER_IDX]=true; if(POS){ primary[POS.field]=''; applyPosition(primary); } }
+  else { if(PITCHER_IDX!==undefined) primary[PITCHER_IDX]=false; if(POS) primary[POS.field]=(f.pos||''); }
+  primary._class=f.cls||''; primary._dob=f.dob||''; primary._agent=f.agent||'';
+  primary._bats=f.bats||''; primary._throws=f.throws||'';
+  recalc(primary);
+  // 4) Reconcile the primary's device checkboxes with the surviving rows, then
+  //    restamp the linked rows with the merged identity (rebuilds Blast per hand).
+  reconcileDevFlags(primary);
+  syncLinkedNames(primary);
+  // 5) Remove the source players from the roster (device rows were relinked, so
+  //    do NOT strip them). The kept player stays selected.
+  for(var pi=players.length-1;pi>=0;pi--){ if(players[pi]!==primary && players[pi]._pid && srcPids[players[pi]._pid]) players.splice(pi,1); }
+  var ki=players.indexOf(primary); current=ki>=0?ki:0;
+  persistEvents();
+  closeModal();
+  renderSavedEvents(activeIdx); updateGate();
+  renderPlayers(); renderForm(); renderDevLinks(); if(mode==='data') renderDataEntry();
+  // Push the merged profile to the DB (edits the primary's profile doc). Source
+  //    DB profiles are intentionally left in place (matches the app convention
+  //    that removing a player from the roster never deletes its DB profile).
+  scheduleDBSync(primary);
+  showToast('Merged '+selectedPlayers.length+' players');
 }
 function deField(label,val,onIn){
   const w=document.createElement('div');w.className='field';
