@@ -2069,11 +2069,10 @@ async function pitchGroupVeloModal(ev){
   const ZW=130/500*100, ZH=164/460*100, ZCX=50, ZCY=47;
   function calcInzone(x,y){ return x>=ZCX-ZW/2 && x<=ZCX+ZW/2 && y>=ZCY-ZH/2 && y<=ZCY+ZH/2; }
   const header = '<div class="modal-head">'
-    + '<h4 class="modal-head-title">Velo &amp; Pitch Group</h4>'
-    + '<button type="button" class="btn small ghost chg-zone" id="chg-zone-btn">Change Pitch Location</button>'
+    + '<h4 class="modal-head-title">Pitch Info</h4>'
     + '</div>';
-  const miniZone = '<div class="mini-sz-wrap" id="mini-sz-wrap" style="display:none">'
-    + '<div class="mini-sz-hint">Tap the new pitch location</div>'
+  const miniZone = '<div class="mini-sz-wrap" id="mini-sz-wrap">'
+    + '<div class="mini-sz-hint">Tap to change pitch location</div>'
     + '<div class="mini-sz-area" id="mini-sz-area"><div class="mini-sz-zone"></div><div class="mini-sz-dot" id="mini-sz-dot"></div></div>'
     + '</div>';
   const html = header
@@ -2090,7 +2089,7 @@ async function pitchGroupVeloModal(ev){
     + '</div>'
     + miniZone
     + '<button type="button" data-resolve="next" id="pgv-next" style="display:none"></button>';
-  const p = showModal({ html, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
+  const p = showModal({ title:'', html, showBack:true, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
   // When the modal opened (used to swallow a touch ghost-click).
   const _pgvOpenedAt = Date.now();
   const grpBtns = Array.from(modalRoot.querySelectorAll('[data-pg]'));
@@ -2128,7 +2127,9 @@ async function pitchGroupVeloModal(ev){
   const chgBtn = $('chg-zone-btn'), mzWrap = $('mini-sz-wrap'), mzArea = $('mini-sz-area'), mzDot = $('mini-sz-dot');
   function placeDot(){ mzDot.style.left=px+'%'; mzDot.style.top=py+'%'; mzDot.classList.toggle('inzone', inzone); }
   placeDot();
-  chgBtn.addEventListener('click', ()=>{ const show = mzWrap.style.display==='none'; mzWrap.style.display = show?'block':'none'; chgBtn.classList.toggle('on', show); });
+  // The change-pitch-location mini zone is always visible now; the old toggle
+  // button was removed, so only wire it if present.
+  if(chgBtn) chgBtn.addEventListener('click', ()=>{ const show = mzWrap.style.display==='none'; mzWrap.style.display = show?'block':'none'; chgBtn.classList.toggle('on', show); });
   mzArea.addEventListener('click', (e)=>{ const r=mzArea.getBoundingClientRect(); px=Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)); py=Math.max(0,Math.min(100,(e.clientY-r.top)/r.height*100)); inzone=calcInzone(px,py); placeDot(); paintZone(); });
   function submitGroup(g){ commitGroup(g); }
   function pgvOnKey(e){
@@ -2145,6 +2146,7 @@ async function pitchGroupVeloModal(ev){
   setTimeout(()=>{ try{ veloSel.focus(); }catch(e){} }, 0);
   const res = await p;
   document.removeEventListener('keydown', pgvOnKey, true);
+  if (res==='__back__') return '__back__';
   if (res!=='next') return null;
   if (!chosen) chosen='FB';
   const velo = noVeloBox.checked ? '' : parseInt(veloSel.value,10);
@@ -2158,11 +2160,7 @@ async function pitchInfoModal(ev, geomInzone){
   const extraCur = (ev.location==='NonComp'||ev.location==='IntBall') ? ev.location : '';
   let swingSel = (ev.swing==='InPlay'||ev.swing==='Whiff'||ev.swing==='Take'||ev.swing==='Foul') ? ev.swing : '';
   let outcome=null;
-  const html = '<div class="sect-lbl">Extra Info</div>'
-    + '<div class="loc-checks">'
-    + LOC_OPTS.map(o=>'<label><input type="checkbox" name="locx" value="'+o[0]+'"'+(o[0]===extraCur?' checked':'')+'/> '+o[1]+'</label>').join('')
-    + '</div>'
-    + '<div class="sect-lbl">Swing Outcome</div>'
+  const html = '<div class="sect-lbl">Swing Outcome</div>'
     + '<div class="swing-row">'
     +   '<button type="button" class="pk swing-pick hollow" data-sw="InPlay">InPlay</button>'
     +   '<button type="button" class="pk swing-pick hollow" data-sw="Whiff">Whiff</button>'
@@ -2183,14 +2181,12 @@ async function pitchInfoModal(ev, geomInzone){
     +   '</div>'
     + '</div>'
     + '<button type="button" data-resolve="done" id="pi-done" style="display:none"></button>';
-  const p = showModal({ title:'Pitch Info', html, showBack:true, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
+  const p = showModal({ title:'Pitch Result', html, showBack:true, buttons:[{label:'Cancel',value:'cancel',className:'btn ghost',fullWidth:true}] });
   const doneBtn = $('pi-done');
   function finish(o){ outcome=o; doneBtn.click(); }
   function locVal(){ const picked=modalRoot.querySelector('input[name=locx]:checked'); return picked?picked.value:(inzone?'InZone':'OutOfZone'); }
   const swBtns = Array.from(modalRoot.querySelectorAll('[data-sw]'));
   const resBtns = Array.from(modalRoot.querySelectorAll('[data-res]'));
-  const locxBtns = Array.from(modalRoot.querySelectorAll('input[name=locx]'));
-  locxBtns.forEach(b=> b.addEventListener('change', ()=>{ if(b.checked){ locxBtns.forEach(o=>{ if(o!==b) o.checked=false; }); } }));
   function resDisabled(name){
     if(!swingSel) return true;                 // grayed by default until a swing is chosen
     if(swingSel==='Whiff') return !(name==='Strike'||name==='K');
@@ -2327,10 +2323,21 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy, onInit){
     wrap.appendChild(popupEl);
     const wr=wrap.getBoundingClientRect();
     const px0=sx/FIELD_VB_W*wr.width, py0=sy/FIELD_VB_H*wr.height;
-    const pw=popupEl.offsetWidth, ph=popupEl.offsetHeight;
-    let left=px0+14; if(left+pw>wr.width) left=px0-pw-14; if(left<4) left=4;
-    let top=py0+14; if(top+ph>wr.height) top=wr.height-ph-4; if(top<4) top=4;
-    popupEl.style.left=left+'px'; popupEl.style.top=top+'px';
+    // Position the popup near the tap, but flip it ABOVE the tap point when the
+    // tap lands on the lower half of the field. The menu grows downward as the
+    // Contact Quality / Batted To / PA Outcome rows reveal, so opening upward
+    // from a low tap keeps those rows from being clipped at the bottom edge.
+    // Re-run after each reveal so the popup stays fully on screen as it grows.
+    const openUp = py0 > wr.height/2;
+    function reposition(){
+      const pw=popupEl.offsetWidth, ph=popupEl.offsetHeight;
+      let left=px0+14; if(left+pw>wr.width) left=px0-pw-14; if(left<4) left=4;
+      let top;
+      if(openUp){ top=py0-ph-14; if(top+ph>wr.height) top=wr.height-ph-4; if(top<4) top=4; }
+      else { top=py0+14; if(top+ph>wr.height) top=wr.height-ph-4; if(top<4) top=4; }
+      popupEl.style.left=left+'px'; popupEl.style.top=top+'px';
+    }
+    reposition();
     const cqRow=popupEl.querySelector('#cq-row'), btoRow=popupEl.querySelector('#bto-row'), paRow=popupEl.querySelector('#pa-row');
     const bbWrap=popupEl.querySelector('.fp-bb'), cqWrap=popupEl.querySelector('.fp-cq'), btoWrap=popupEl.querySelector('.fp-bto'), paWrap=popupEl.querySelector('.fp-pa');
     function paint(w,val){ w.querySelectorAll('.fp-opt').forEach(o=> o.classList.toggle('on', o.getAttribute('data-v')===val)); }
@@ -2338,9 +2345,9 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy, onInit){
     function done(){ cleanup(); resolve({ pa_outcome:pickPA, contact_quality:pickCQ, batted_ball:pickBB, batted_to:pickBTo, homerun:isHR }); }
     function cancel(){ cleanup(); resolve(null); }
     if(typeof onInit==='function') onInit(cancel);
-    function pickBBType(v){ pickBB=v; paint(bbWrap,pickBB); cqRow.style.display='block'; if(pickBB==='PU'){ pickCQType('Weak'); } }
-    function pickCQType(v){ pickCQ=v; paint(cqWrap,pickCQ); btoRow.style.display='block'; paint(btoWrap,pickBTo); if(pickBTo){ pickBToVal(pickBTo); } }
-    function pickBToVal(v){ pickBTo=v; paint(btoWrap,pickBTo); paRow.style.display='block'; }
+    function pickBBType(v){ pickBB=v; paint(bbWrap,pickBB); cqRow.style.display='block'; reposition(); if(pickBB==='PU'){ pickCQType('Weak'); } }
+    function pickCQType(v){ pickCQ=v; paint(cqWrap,pickCQ); btoRow.style.display='block'; paint(btoWrap,pickBTo); reposition(); if(pickBTo){ pickBToVal(pickBTo); } }
+    function pickBToVal(v){ pickBTo=v; paint(btoWrap,pickBTo); paRow.style.display='block'; reposition(); }
     bbWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickBBType(b.getAttribute('data-v'))));
     cqWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickCQType(b.getAttribute('data-v'))));
     btoWrap.querySelectorAll('.fp-opt').forEach(b=> b.addEventListener('click',()=> pickBToVal(b.getAttribute('data-v'))));
@@ -2408,27 +2415,34 @@ async function fieldSprayModal(ev){
   return null;
 }
 async function classifyPitch(ev, geomInzone){
-  let step=0, piLoc='';
+  // Menu order: Pitch Result -> Field Spray (only when the ball is InPlay) ->
+  // Pitch Info (velo & pitch group). The LAST modal (Pitch Info) is the submit
+  // step. Since Non-Competitive / Intentional Ball were removed, location is
+  // always InZone / OutOfZone, so the final location is decided by ev.inzone
+  // after the last modal (its mini-zone can still re-tap the pitch location).
+  let step=0;
+  let resultInfo=null, sprayInfo=null, isInPlay=false;
   while(true){
     if(step===0){
+      const info = await pitchInfoModal(ev, ev.inzone);
+      if(info==='__back__'){ if(await confirmCancel()) return false; else continue; }
+      if(info===null){ if(await confirmCancel()) return false; else continue; }
+      if(info.__goField__){ isInPlay=true; resultInfo=null; step=1; continue; }
+      resultInfo=info; isInPlay=false; step=2; continue;
+    } else if(step===1){
+      const fr = await fieldSprayModal(ev);
+      if(fr==='__back__'){ step=0; continue; }
+      if(fr===null){ if(await confirmCancel()) return false; else continue; }
+      sprayInfo=fr; step=2; continue;
+    } else {
       const pg = await pitchGroupVeloModal(ev);
+      if(pg==='__back__'){ step = isInPlay?1:0; continue; }
       if(pg===null){ if(await confirmCancel()) return false; else continue; }
       ev.pitch_group=pg.group; ev.velo=pg.velo;
       if(pg.inzone!=null) ev.inzone=pg.inzone;
-      step=1;
-    } else if(step===1){
-      const info = await pitchInfoModal(ev, ev.inzone);
-      if(info==='__back__'){ step=0; continue; }
-      if(info===null){ if(await confirmCancel()) return false; else continue; }
-      if(info.__goField__){ piLoc=info.location; step=2; continue; }
-      applyPitchInfo(ev, info);
-      return true;
-    } else {
-      const fr = await fieldSprayModal(ev);
-      if(fr==='__back__'){ step=1; continue; }
-      if(fr===null){ if(await confirmCancel()) return false; else continue; }
-      fr.location=piLoc;
-      applyPitchInfo(ev, fr);
+      const finalInfo = isInPlay ? sprayInfo : resultInfo;
+      finalInfo.location = ev.inzone?'InZone':'OutOfZone';
+      applyPitchInfo(ev, finalInfo);
       return true;
     }
   }
