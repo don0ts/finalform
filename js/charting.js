@@ -2308,7 +2308,7 @@ async function battedBallPopup(ev, pos, num, isHR, wrap, sx, sy, onInit){
     const BB_DEFS=[['GB','G'],['LD','L'],['FB','F'],['PU','P']];
     const CQ_DEFS=[['Bunt','B'],['Weak','W'],['Avg','A'],['Hard','H']];
     const PA_DEFS=[['1B','1B','1'],['2B','2B','2'],['3B','3B','3'],['HR','HR','4'],['OUT','OUT','O'],['FC','FC','F'],['E','E','E'],['DP','DP','D'],['SAC','SACB','B'],['SACF','SACF','S']];
-    let pickBB='', pickCQ='', pickBTo=num||'', pickPA=isHR?'HR':'';
+    let pickBB='', pickCQ='', pickBTo='', pickPA=isHR?'HR':'';
     const title=isHR?'Home Run':'Hit to '+pos;
     const btoOpts=['1','2','3','4','5','6','7','8','9'].map(n=>'<button type="button" class="fp-opt bto-opt'+(n===pickBTo?' on':'')+'" data-v="'+n+'">'+n+' <small>'+NUM_POS[n]+'</small></button>').join('');
     const PA_LIST=(isHR?[['HR','HR','4']]:PA_DEFS);
