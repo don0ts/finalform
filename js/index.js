@@ -174,12 +174,34 @@ function loadEvents(){
 // opening an event never invents a duplicate in the database, and it writes the
 // same payload shape the manual Save uses.
 var _eventDbTimer=null, _eventPushedSig='', _evPushPending=false, _evPushDirty=false;
+// Device links are stored TWICE: as rows in data.devices.* AND as the _dev flags on
+// the player (Blast tick / R-L hands / chosen Blast number). A player edit rewrites
+// the _dev flags from the rows, so a second copy of those flags inside the event
+// signature made a real edit look like a no-op (untick Blast -> identical JSON) and
+// the write was skipped. Only the DATA-ENTRY rows go into the signature; the player
+// flags travel with ev.players. Time of Day is only a label carried on every save,
+// so it stays out of the signature too (a real Time of Day change is detected
+// separately so it still syncs).
+function _devSig(data){
+  if(!data||typeof data!=='object') return data||null;
+  try{
+    var o={}; Object.keys(data).forEach(function(k){ if(k!=='devices'&&k!=='tod') o[k]=data[k]; });
+    if(data.devices&&data.devices.blast&&data.devices.blast.players){
+      // The Blast number typed on THIS device is echoed inside the row's account
+      // name, so the newest number never loses the signature check.
+      o._blastTxt=(function(){
+        try{ var p=players[current]; return (p&&p._dev)?String(p._dev.blastTxtR||p._dev.blastTxtL||p._dev.blastTxt||''):''; }catch(e){ return ''; }
+      })();
+    }
+    return o;
+  }catch(e){ return data; }
+}
 // Everything that matters about an event, minus the bookkeeping fields, so we can
 // tell a real edit from a no-op repaint.
 function _eventSig(ev){
   if(!ev) return '';
   try{
-    return JSON.stringify([String(ev.name||''),String(ev.date||''),ev.players||[],ev.data||null]);
+    return JSON.stringify([String(ev.name||''),String(ev.date||''),ev.players||[],_devSig(ev.data)]);
   }catch(e){ return String(Date.now()); }
 }
 var _evPushStart=0;
@@ -265,11 +287,14 @@ function _evMarkLocal(ev){
 if(typeof window!=='undefined'){
   window.__evSnapStamp=function(){ return _lastLivePush; };
 }
-function persistEvents(){
+function persistEvents(force){
   if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; _evMarkLocal(events[activeIdx]); }
   try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
   if(hasActiveEvent() && players[current]) scheduleDBSync(players[current]);
-  scheduleEventDbSync();
+  // A device-flag edit (Blast tick / hand / Blast number) does not change the
+  // Data Entry rows the same way a row edit does, so it is always pushed
+  // explicitly instead of waiting for a signature to differ.
+  scheduleEventDbSync(!!force);
   if(_popupSearchClear){ try{ _popupSearchClear(); }catch(e){} }
 }
 // A stable identifier for an event so the last selection survives a refresh
@@ -406,9 +431,10 @@ function applyDbEvents(list, snap){
     if((!ev.data||!ev.data.tod) && incoming.data && incoming.data.tod && merged.data){ merged.data.tod=incoming.data.tod; }
     var newName=(incoming.name!==undefined?(incoming.name||''):(ev.name||''));
     var newDate=(incoming.date!==undefined?(incoming.date||''):(ev.date||''));
-    var before=JSON.stringify({n:ev.name||'',d:ev.date||'',p:ev.players||[],x:ev.data||null});
-    var after=JSON.stringify({n:newName,d:newDate,p:merged.players,x:merged.data});
-    if(before===after) return; // nothing new for this event
+    var before=JSON.stringify({n:ev.name||'',d:ev.date||'',p:ev.players||[],x:_devSig(ev.data)});
+    var after=JSON.stringify({n:newName,d:newDate,p:merged.players,x:_devSig(merged.data)});
+    var todDiff=String((merged.data&&merged.data.tod)||'')!==String((ev.data&&ev.data.tod)||'');
+    if(before===after && !todDiff) return; // nothing new for this event
     ev.name=newName; ev.date=newDate; ev.players=merged.players;
     if(incStamp) ev._localStamp=Math.max(_evLocalStamp(ev)||0, incStamp);
     // Merged Data Entry payload (device links / IDs / Time of Day) so tech captured
@@ -1705,6 +1731,28 @@ function computeMergedEvent(selected, sameEvent){
   // ticked box with no row, or a row with an unticked box).
   mergedPlayers.forEach(function(mp){
     if(!mp._dev) mp._dev={};
+    // Keep the Blast numbers chosen on either device. They live only in the player
+    // flags (_dev.blastTxt*), not in the Data Entry rows, so a plain merge would
+    // drop "11" when the other copy of this player arrived with "10".
+    // The FIRST source (selected[0]) is this device's own copy, so its Blast
+    // numbers are the ones that win; a number is only taken from the other copy
+    // when ours is still empty (e.g. it was never typed on this device).
+    var _devSrcs=[];
+    selected.forEach(function(ev){
+      (ev.players||[]).forEach(function(op){
+        if(!op||!op._dev) return;
+        var oid=(PIDCUBS_IDX!==undefined && op[PIDCUBS_IDX]!=null)?String(op[PIDCUBS_IDX]).trim().toLowerCase():'';
+        var mid=(PIDCUBS_IDX!==undefined && mp[PIDCUBS_IDX]!=null)?String(mp[PIDCUBS_IDX]).trim().toLowerCase():'';
+        if(oid&&mid&&oid===mid) _devSrcs.push(op._dev);
+        else if(!oid&&!mid&&_fold(op[NAME_IDX])&&_fold(op[NAME_IDX])===_fold(mp[NAME_IDX])) _devSrcs.push(op._dev);
+      });
+    });
+    ['blastTxt','blastTxtR','blastTxtL'].forEach(function(k){
+      for(var si=0;si<_devSrcs.length;si++){
+        var ov=(_devSrcs[si][k]===undefined||_devSrcs[si][k]===null)?'':String(_devSrcs[si][k]);
+        if(ov!==''){ mp._dev[k]=ov; break; }
+      }
+    });
     ['trackman','forceplate','timinggates','dynamo'].forEach(function(dk){
       var arr=(mergedData.devices[dk]&&mergedData.devices[dk].players)||[];
       mp._dev[dk]=arr.some(function(x){ return x.linkPid===mp._pid; });
@@ -2596,10 +2644,12 @@ function buildDeviceRow(p, refresh){
         txt.style.display=p._dev['blast'+h]?'':'none';
         hcb.addEventListener('change',()=>{
           p._dev['blast'+h]=hcb.checked;
+          // Remember the chosen number on the player itself so the row that gets
+          // rebuilt below keeps the same hand order (R then L) on every device.
           txt.style.display=hcb.checked?'':'none';
-          syncBlast(p); persistEvents(); if(mode==='data') renderDataEntry();
+          syncBlast(p); persistEvents(); renderDevLinks(); if(mode==='data') renderDataEntry();
         });
-        txt.addEventListener('click',()=>{ openIntPicker('Blast '+h+' number', 1, 70, (v)=>{ p._dev['blastTxt'+h]=v; setBlastLbl(); syncBlast(p); persistEvents(); if(mode==='data') renderDataEntry(); }); });
+        txt.addEventListener('click',()=>{ openIntPicker('Blast '+h+' number', 1, 70, (v)=>{ p._dev['blastTxt'+h]=v; setBlastLbl(); syncBlast(p); persistEvents(true); renderDevLinks(); if(mode==='data') renderDataEntry(); }); });
         hc.appendChild(hcb);hc.appendChild(hsp);grp.appendChild(hc);grp.appendChild(txt);wrap.appendChild(grp);
       });
       wrap.style.display=p._dev.blast?'':'none';
@@ -2622,7 +2672,8 @@ function buildDeviceRow(p, refresh){
         if(cb.checked && !p._dev.blastR && !p._dev.blastL){
           if(p._bats==='R') p._dev.blastR=true; else if(p._bats==='L') p._dev.blastL=true;
         }
-        syncBlast(p); persistEvents(); if(refresh) refresh();
+        syncBlast(p); persistEvents(true); if(refresh) refresh();
+        renderDevLinks();
         if(mode==='data') renderDataEntry();
         return;
       }
