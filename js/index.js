@@ -164,7 +164,14 @@ function applyEventTod(v){
 function loadEvents(){
   try{ events=JSON.parse(localStorage.getItem(EVENTS_KEY)||'[]'); }catch(e){ events=[]; }
   if(!Array.isArray(events)) events=[];
-  events.forEach(ev=>{ if(!Array.isArray(ev.players)) ev.players=[]; });
+  events.forEach(ev=>{
+    if(!Array.isArray(ev.players)) ev.players=[];
+    // Rows written by an older build (or another page) can carry Name / Cubs ID /
+    // event date under their field name instead of their column position. Put
+    // them where this app reads them, so a device tick always lands on the same
+    // player on every device.
+    ev.players.forEach(function(pl){ try{ _normPlayerIdx(pl); }catch(e){} });
+  });
 }
 // ---- Live event upload -------------------------------------------------
 // Every edit (measurement, device data, roster change) used to live only in this
@@ -1554,6 +1561,29 @@ function _mergeKey(op){
   if(nm) return 'nm:'+nm;
   return 'uid:'+(op._pid||(Math.random().toString(36).slice(2)));
 }
+
+// Normalise a player row so Name / Cubs ID / event date are reachable under the
+// schema index whether they were stored by index or by field name.
+function _normPlayerIdx(o){
+  if(!o||typeof o!=='object') return o;
+  try{
+    var frow=(SCHEMA&&SCHEMA.field_row)||[];
+    SCHEMA.ui_groups.forEach(function(g){
+      g.fields.forEach(function(f){
+        var byIdx=(o[f.idx]!==undefined&&o[f.idx]!==null&&o[f.idx]!=='')?o[f.idx]:undefined;
+        var byName=(o[f.name]!==undefined&&o[f.name]!==null&&o[f.name]!=='')?o[f.name]:undefined;
+        var pickV=(byIdx!==undefined)?byIdx:((byName!==undefined)?byName:undefined);
+        if(pickV===undefined) return;
+        var t=(f.type==='bool')?'b':'s';
+        // Only touch a slot that is empty or holds the other representation.
+        var cur=o[f.idx];
+        var curOk=(f.type==='bool')?(typeof cur==='boolean'):(cur!==undefined&&cur!==null&&cur!==''&&typeof cur!=='object');
+        if(!curOk) o[f.idx]=pickV;
+      });
+    });
+    return o;
+  }catch(e){ return o; }
+}
 function _isBlankCell(v){ return v===''||v===false||v===undefined||v===null; }
 function _clonePlayer(op){ return JSON.parse(JSON.stringify(op)); }
 // Fill empty cells / blank profile fields / blank device toggles on the kept
@@ -1665,6 +1695,10 @@ function computeMergedEvent(selected, sameEvent){
         mp.__ei=ei;
         byKey[key]=mp; mergedPlayers.push(mp);
       } else { _backfillPlayer(mp, op); }
+      // This copy's player id now belongs to the kept player. pidMap is shared by
+      // all copies when a single event is merged, so a device row saved by the
+      // OTHER device (carrying that device's player id) re-links to the same
+      // player instead of turning into an extra row.
       pidMap[ei+':'+(op._pid||'')]=mp._pid;
       // remember this source player's identity so its device rows can be relinked
       var pre=_scope(ei);
@@ -1714,13 +1748,35 @@ function computeMergedEvent(selected, sameEvent){
       if(!mergedData.devices[dk]) mergedData.devices[dk]={players:[]};
       var dest=mergedData.devices[dk].players;
       ((devs[dk]&&devs[dk].players)||[]).forEach(function(entry){
-        var e2=JSON.parse(JSON.stringify(entry));
-        var resolved=resolveEntryLink(e2, ei);
+    // Custom fields (Name, player_id_cubs, ...) live on the row under their schema
+    // index ("0", "1", ...) while they are being edited, so a copy that arrives with
+    // those stored under their field name (or the other way round) has to be
+    // normalised first -- otherwise the two copies never match and switch a device
+    // row on one device can still be linked to a DIFFERENT player object on the
+    // other, leaving the checkbox looking stale.
+    var _raw=JSON.parse(JSON.stringify(entry));
+    var e2=(typeof _normPlayerIdx==='function')?_normPlayerIdx(_raw):_raw;
+        // Same-event copies are merged (ei is always 0 there), so a row can be
+        // looked up by the link id of ANY copy -- otherwise a row saved on the
+        // other device (with that device's player id) is treated as a stranger
+        // and both copies end up stacked in the Data Entry tab.
+        var resolved=resolveEntryLink(e2, sameEvent?0:ei);
         if(resolved) e2.linkPid=resolved;
         var dup=(e2.linkPid!=null && e2.linkPid!=='') && dest.some(function(x){
           if(dk==='blast') return x.linkPid===e2.linkPid && (x.hand||'')===(e2.hand||'');
           return x.linkPid===e2.linkPid;
         });
+        if(!resolved && e2.linkPid!=null && e2.linkPid!=''){
+          // A row whose link cannot be resolved is matched by identity too, so
+          // one player never shows up twice in the Data Entry tab.
+          dup=dest.some(function(x){
+            if(dk==='blast' && (x.hand||'')!==(e2.hand||'')) return false;
+            var cid=(e2.cubsId!=null)?String(e2.cubsId).trim().toLowerCase():'';
+            var xcid=(x.cubsId!=null)?String(x.cubsId).trim().toLowerCase():'';
+            if(cid && xcid && cid===xcid) return true;
+            var nm=_fold(e2.name); return !!(nm && nm===_fold(x.name));
+          });
+        }
         if(!dup) dest.push(e2);
       });
     });
