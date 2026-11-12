@@ -163,10 +163,49 @@ function loadEvents(){
   if(!Array.isArray(events)) events=[];
   events.forEach(ev=>{ if(!Array.isArray(ev.players)) ev.players=[]; });
 }
+// ---- Live event upload -------------------------------------------------
+// Every edit (measurement, device data, roster change) used to live only in this
+// browser until someone pressed "Save to DB", so another device never saw it.
+// This pushes the ACTIVE event to the database a moment after the user stops
+// typing. It only touches events that already have a DB document, so simply
+// opening an event never invents a duplicate in the database, and it writes the
+// same payload shape the manual Save uses.
+var _eventDbTimer=null;
+function scheduleEventDbSync(){
+  var db=_cdb(); if(!db||!db.eventUpsert) return;
+  if(!hasActiveEvent()) return;
+  var ev=events[activeIdx];
+  if(!ev||!ev._dbId) return;                 // only update events already in the DB
+  if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return;
+  clearTimeout(_eventDbTimer);
+  var _idx=activeIdx;
+  _eventDbTimer=setTimeout(function(){
+    var cur=events[_idx];
+    if(!cur||!cur._dbId) return;
+    var id=cur._dbId;
+    try{
+      Promise.resolve(db.eventUpsert(id,{
+        event_id:id,
+        name:String(cur.name||''),
+        date:String(cur.date||''),
+        player_count:(cur.players?cur.players.length:0),
+        data:JSON.stringify(cur,function(k,v){ if(k==='_dbId'||k==='_fromDb') return undefined; return v; }),
+        saved_at:new Date().toISOString()
+      })).then(function(){ _lastLivePush=Date.now(); }).catch(function(){});
+    }catch(e){}
+  }, 1200);
+}
+var _lastLivePush=0;
+function isLivePushEcho(){
+  // True right after our own write lands, so the inbound listener refreshing the
+  // same event doesn't stomp on what the user is still typing.
+  return (Date.now()-_lastLivePush)<2500;
+}
 function persistEvents(){
   if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; }
   try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
   if(hasActiveEvent() && players[current]) scheduleDBSync(players[current]);
+  scheduleEventDbSync();
   if(_popupSearchClear){ try{ _popupSearchClear(); }catch(e){} }
 }
 // A stable identifier for an event so the last selection survives a refresh
@@ -255,8 +294,9 @@ function applyDbEvents(list){
     if(!hasPayload) return;
     var ev=events[idx];
     var isActive=(activeIdx===idx);
-    // Don't overwrite the active event while the user is editing it.
-    if(isActive && (popupOpen || isFormFieldFocused())) return;
+    // Don't overwrite the active event while the user is editing it, or while a
+    // change we just pushed ourselves is still settling in the database.
+    if(isActive && (popupOpen || isFormFieldFocused() || isLivePushEcho())) return;
     // Existing event -> MERGE the incoming DB copy into the local one instead of
     // overwriting it, so a player that already has information locally keeps that
     // information and simply gains anything new captured on the other device.
@@ -314,7 +354,9 @@ function applyDbEvents(list){
     try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
     renderSavedEvents(hasActiveEvent()?activeIdx:undefined);
     updateGate();
-    if(activeChanged){ renderPlayers(); renderForm(); renderDataEntry(); }
+    renderPlayers();
+    if(!isFormFieldFocused()) renderForm();
+    if(activeChanged || (hasActiveEvent() && players.length && !isFormFieldFocused())) renderDataEntry();
     // Visible confirmation that an inbound change actually arrived from another
     // device (helps distinguish a sync problem from a rendering problem).
     if(refreshed>0){ try{ showToast('Synced update from another device'); }catch(e){} }
@@ -2154,7 +2196,17 @@ function applyDbToRoster(){
     // Remove from unmatchedPlayers so one doc can't match two players
     unmatchedPlayers=unmatchedPlayers.filter(function(p){ return p!==matchP; });
   });
-  if(changed){ persistEvents(); renderPlayers(); if(curChanged) renderForm(); }
+  if(changed){
+    // Only WRITE back to storage when something non-visual changed; render every
+    // time so an edit that arrived from another device is actually painted.
+    if(curChanged || changed) persistEvents();
+    renderPlayers();
+    // Always repaint the form: renderPlayers() only redraws the name pills, so
+    // measurement values that just arrived from the DB would otherwise never
+    // show up on screen. Skip only if the user is mid-typing in the open form.
+    if(!isFormFieldFocused()) renderForm();
+    if(mode==='data') renderDataEntry();
+  }
 }
 if(typeof window!=='undefined') window.__applyDbToRoster=applyDbToRoster;
 // ---- Status: per data-group "last date taken" (stored in the DB profile only, NOT in the CSV) ----
