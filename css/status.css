@@ -35,6 +35,18 @@ tbody tr:hover{background:rgba(56,189,248,.04)}
 .menu button{display:block;width:100%;text-align:left;background:transparent;border:none;padding:9px 12px;border-radius:7px;font-size:13px;color:var(--txt)}
 .menu button:hover{background:var(--chip);color:#fff}
 .menu button.del:hover{background:rgba(239,68,68,.2);color:#fca5a5}
+/* ---- toggleable group checkbox (uncheck = clear + step back a date) ---- */
+.dcheck{display:inline-flex;align-items:center;gap:6px;border-radius:6px;padding:2px 8px 2px 6px;cursor:pointer;user-select:none}
+.dcheck.g{background:var(--greenbg);color:var(--greentxt)}
+.dcheck.y{background:var(--yellowbg);color:var(--yellowtxt)}
+.dcheck.r{background:var(--redbg);color:var(--redtxt)}
+.dcheck.none{background:transparent;color:var(--muted)}
+.dcheck input[type=checkbox]{appearance:none;-webkit-appearance:none;width:15px;height:15px;border-radius:4px;border:1.5px solid var(--line);background:#0b1220;margin:0;cursor:pointer;flex:0 0 auto;position:relative;transition:.12s}
+.dcheck input[type=checkbox]:hover{border-color:#4f9dff}
+.dcheck input[type=checkbox]:checked{background:#2563eb;border-color:#3b82f6}
+.dcheck input[type=checkbox]:checked::after{content:'';position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.dcheck .dtxt{font-variant-numeric:tabular-nums;cursor:pointer;white-space:nowrap}
+.dcheck .dtxt:hover{text-decoration:underline}
 .dcell.none{color:var(--muted);font-weight:400}
 .dcell.grayed{color:#555;font-weight:400;background:rgba(100,100,100,.1);border-radius:6px;padding:3px 8px;cursor:default}
 .badge{display:inline-block;background:rgba(56,189,248,.13);color:var(--accent);font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;letter-spacing:.3px}

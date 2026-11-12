@@ -49,7 +49,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, deleteDoc, updateDoc, deleteField, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, getDoc, setDoc, deleteDoc, updateDoc, deleteField, onSnapshot, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // >>> PASTE THE SAME CONFIG YOU USED IN THE DATA-ENTRY TOOL <<<
 const firebaseConfig = {
@@ -67,24 +67,44 @@ function setState(txt,cls){ const s=document.getElementById('connState'); if(s){
 try {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
+  // Offline support: cache Firestore data locally so the last known status
+  // table loads even without a connection, and edits sync when it returns.
+  try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
   const col = collection(db, COLLECTION);
+  // Last-known snapshot fallback for the first offline load.
+  try { const _s=localStorage.getItem('cubs_last_players'); if(_s){ const _list=JSON.parse(_s)||[]; if(window.__applyData) window.__applyData(_list, null); } } catch(e){}
   const api = {
     ready:true,
     upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
     remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
     setStatusDate(id, group, value){ var u={}; u['status.'+group]=value; return updateDoc(doc(db, COLLECTION, String(id)), u); },
-    clearStatusDate(id, group){ var u={}; u['status.'+group]=deleteField(); return updateDoc(doc(db, COLLECTION, String(id)), u); }
+    clearStatusDate(id, group){ var u={}; u['status.'+group]=deleteField(); return updateDoc(doc(db, COLLECTION, String(id)), u); },
+    // Append a date to that group's dated history (used to step back when a
+    // group checkbox is turned off). Keeps the newest 40, newest first.
+    pushStatusHist(id, group, value){
+      var ref=doc(db, COLLECTION, String(id));
+      return getDoc(ref).then(function(snap){
+        var data=snap.exists()?snap.data():{};
+        var hist=(data.statusHist&&data.statusHist[group])||[];
+        hist=hist.filter(function(x){ return String(x)!==String(value); });
+        hist.unshift(String(value));
+        if(hist.length>40) hist=hist.slice(0,40);
+        var u={}; u['statusHist.'+group]=hist;
+        return updateDoc(ref,u);
+      });
+    }
   };
   window.CubSentryDB = api;
   if(window.__setDB) window.__setDB(api);
   onSnapshot(col, snap => {
     const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+    try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
     setState('Connected \u2022 live', 'ok');
     if(window.__applyData) window.__applyData(list, api);
   }, err => {
     console.warn('Firestore listen error:', err);
-    setState('Connection error \u2014 check your config', 'bad');
-    const sb=document.getElementById('statusBox'); if(sb){ sb.className='status err'; sb.style.display=''; sb.textContent='Could not read the database. Paste your Firebase keys into this file (same as the data-entry tool) and reload.'; }
+    setState('Offline \u2014 showing last known data', 'bad');
+    try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], api); } catch(e){}
   });
 } catch(e){
   console.warn('Firebase init failed:', e);

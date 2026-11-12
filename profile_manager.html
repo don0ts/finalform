@@ -47,7 +47,7 @@
 <script type="module">
 // ==== Firestore connection (same project / collection as the data-entry tool) ====
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // >>> PASTE THE SAME CONFIG YOU USED IN THE DATA-ENTRY TOOL <<<
 // Firebase console -> Project settings -> Your apps -> SDK setup and configuration
@@ -66,7 +66,12 @@ function setState(txt,cls){ const s=document.getElementById('connState'); if(s){
 try {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
+  // Offline support: cache Firestore data locally so profiles load and edits
+  // queue/sync even without a connection.
+  try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
   const col = collection(db, COLLECTION);
+  let cache = [];
+  try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
   window.__setRows = null; // set below via closure
   const api = {
     upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
@@ -77,12 +82,14 @@ try {
   if(window.__setDB) window.__setDB(api);
   onSnapshot(col, snap => {
     const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+    cache = list;
+    try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
     setState('Connected \u2022 live', 'ok');
     if(window.__applyData) window.__applyData(list, api);
   }, err => {
     console.warn('Firestore listen error:', err);
-    setState('Connection error \u2014 check your config', 'bad');
-    const sb=document.getElementById('statusBox'); if(sb){ sb.className='status err'; sb.style.display=''; sb.textContent='Could not read the database. Paste your Firebase keys into this file (same as the data-entry tool) and reload.'; }
+    setState('Offline \u2014 showing last known data', 'bad');
+    try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], api); } catch(e){}
   });
 } catch(e){
   console.warn('Firebase init failed:', e);

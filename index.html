@@ -76,7 +76,14 @@
   </div>
   <div id="measurablesView">
   <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-    <button id="addPlayerTop">+ Add player</button>
+    <div style="position:relative">
+      <div class="search addsearch" style="position:relative;min-width:260px;display:flex;align-items:center;gap:8px;background:#0b1220;border:1px solid var(--line);border-radius:8px;padding:0 10px">
+        <span style="color:var(--muted)">&#128269;</span>
+        <input type="text" id="msSearchPlayer" placeholder="Search a player" autocomplete="off" spellcheck="false" style="flex:1;border:0;background:transparent;color:var(--txt);padding:10px 0;font-size:14px;outline:none" />
+      </div>
+      <div id="msSearchSug" class="player-suggest" style="display:none"></div>
+    </div>
+    <button id="addPlayerTop">+Create Player</button>
     <button class="ghost" id="arrangePlayersBtn" title="Arrange players by position: OF, then IF, then C, then P">Arrange Players</button>
     <span class="ocrbar" id="eventDateNote"></span>
   </div>
@@ -90,7 +97,14 @@
     <div id="deGate" class="hint" style="text-align:center;padding:34px 10px">Create or select an event above, then fill in the device data.</div>
     <div id="deContent" style="display:none">
       <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-        <button id="deAddPlayer">+ Add player</button>
+        <div style="position:relative">
+          <div class="search addsearch" style="position:relative;min-width:240px;display:flex;align-items:center;gap:8px;background:#0b1220;border:1px solid var(--line);border-radius:8px;padding:0 10px">
+            <span style="color:var(--muted)">🔍</span>
+            <input type="text" id="deSearchPlayer" placeholder="Search a player" autocomplete="off" spellcheck="false" style="flex:1;border:0;background:transparent;color:var(--txt);padding:10px 0;font-size:14px;outline:none" />
+          </div>
+          <div id="deSearchSug" class="player-suggest" style="display:none"></div>
+        </div>
+        <button id="deAddPlayer">+Create Player</button>
         <button class="ghost" id="deMergePlayers">Merge Players</button>
       </div>
       <div class="seg-group"><div class="lbl">Device IDs (shared metadata)</div>
@@ -109,7 +123,7 @@
 <script type="module">
 // ==== Firestore sync layer (add / edit players -> cloud, live autocomplete cache) ====
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // >>> PASTE YOUR CONFIG: Firebase console -> Project settings -> Your apps -> SDK setup <<<
 const firebaseConfig = {
@@ -134,21 +148,31 @@ setConnState('connecting','Connecting\u2026');
 try {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
+  // Offline support: cache the Cloud Firestore data locally (IndexedDB) so the
+  // last saved players + events load even with no connection, and any edits made
+  // while offline sync automatically once the connection returns.
+  try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
   const col = collection(db, COLLECTION);
   let cache = [];
   const listeners = [];
+  // Last-known snapshot fallback (localStorage) — shown on the very first load
+  // while offline, before IndexedDB has anything cached.
+  try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
+  function _saveSnap(){ try { localStorage.setItem('cubs_last_players', JSON.stringify(cache)); } catch(e){} }
   // live cache -> keeps Add-player autocomplete in sync with the database
   onSnapshot(col, snap => {
     cache = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+    _saveSnap();
     setConnState('connected','Connected');
     listeners.forEach(fn => { try { fn(); } catch(e){} });
     // Live inbound refresh: push external profile edits into the loaded roster.
     if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
-  }, err => { console.warn("Firestore listen error:", err); setConnState('offline','Disconnected'); });
+  }, err => { console.warn("Firestore listen error:", err); setConnState('offline','Disconnected'); listeners.forEach(fn => { try { fn(); } catch(e){} }); });
   // live cache of saved events -> feeds the main-page "Saved events" dropdown
   const evCol = collection(db, EVENTS_COLLECTION);
   onSnapshot(evCol, snap => {
     const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+    try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
     setConnState('connected','Connected');
     if(window.__applyDbEvents){ try { window.__applyDbEvents(evs); } catch(e){} }
   }, err => console.warn("Firestore events listen error:", err));
@@ -157,6 +181,20 @@ try {
     onChange(fn){ listeners.push(fn); },
     upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
     remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
+    // Append a date to that group's dated history (newest first, max 40) so the
+    // Status page can step back to the previous date when a box is unchecked.
+    pushStatusHist(id, group, value){
+      var ref=doc(db, COLLECTION, String(id));
+      return getDoc(ref).then(function(snap){
+        var data=snap.exists()?snap.data():{};
+        var hist=(data.statusHist&&data.statusHist[group])||[];
+        hist=hist.filter(function(x){ return String(x)!==String(value); });
+        hist.unshift(String(value));
+        if(hist.length>40) hist=hist.slice(0,40);
+        var u={}; u['statusHist.'+group]=hist;
+        return updateDoc(ref,u);
+      });
+    },
     eventUpsert(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
     eventRemove(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
   };

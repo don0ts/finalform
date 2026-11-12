@@ -24,6 +24,10 @@
     if (window.firebase && firebase.initializeApp) {
       if (!firebase.apps || !firebase.apps.length) firebase.initializeApp(firebaseConfig);
       db = firebase.firestore();
+      // Offline support: cache the last known charting sessions locally so the
+      // stats pages still render the last data with no connection.
+      try { db.enablePersistence({synchronizeTabs:true}).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); }
+      catch(e){ console.warn('Offline persistence unavailable:', e); }
     }
   } catch (err) { console.error('Firebase init failed (stats)', err); }
 

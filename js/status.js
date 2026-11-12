@@ -133,9 +133,25 @@ function render(){
       }
       var v=st[g]||'';
       var cls=v?ageClass(v):'none';
-      var span=el('span',{className:'dcell '+cls,textContent:v||'\u2014'});
-      if(v){ span.addEventListener('click',function(ev){ ev.stopPropagation(); openDateMenu(ev,r,g,v); }); }
-      td.appendChild(span); tr.appendChild(td);
+      // A real checkbox shows whether this group has a date. Unchecking it clears
+      // the date and steps back to the PREVIOUS date taken (from the history).
+      var lab=el('label',{className:'dcheck '+cls+(v?' checked':'')});
+      var cb=el('input'); cb.type='checkbox'; cb.checked=!!v;
+      cb.setAttribute('data-pid',idOf(r)); cb.setAttribute('data-group',g);
+      cb.addEventListener('click',function(ev){
+        ev.stopPropagation();
+        var want=cb.checked;            // state the user just asked for
+        cb.checked=!want;               // act only once the write confirms/fails
+        setGroupChecked(r,g,want,cb);
+      });
+      lab.appendChild(cb);
+      lab.appendChild(el('span',{className:'dtxt',textContent:v||'\u2014'}));
+      // Clicking the date text still opens the edit/delete menu.
+      lab.querySelector('.dtxt').addEventListener('click',function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        var cur=(r.status||{})[g]||''; openDateMenu(ev,r,g,cur);
+      });
+      td.appendChild(lab); tr.appendChild(td);
     });
     var tdA=el('td');var wrap=el('div',{className:'rowacts'});
     var eb=el('button',{className:'ghost',textContent:'Edit'});eb.addEventListener('click',function(){openEdit(r);});
@@ -239,6 +255,60 @@ function openDateMenu(ev,r,group,val){
   _openMenu=m;
   setTimeout(function(){ document.addEventListener('click',closeDateMenu); },0);
 }
+// ---- dated history: statusHist{group:["mm/dd/yyyy", ...]} (newest first) ----
+// Every time a date is stamped we append it to the group's history, so turning
+// the checkbox OFF can step back to the previous date taken instead of losing it.
+function histOf(r,g){
+  var h=(r&&r.statusHist&&r.statusHist[g])||[];
+  return h.filter(function(x){ return !!parseMDY(x); });
+}
+function prevDateFor(r,g,exclude){
+  var h=histOf(r,g).slice();
+  if(exclude) h=h.filter(function(x){ return String(x)!==String(exclude); });
+  h.sort(function(a,b){ return parseMDY(b)-parseMDY(a); });   // newest first
+  return h.length?h[0]:'';
+}
+function setGroupChecked(r,g,want,cb){
+  if(!DB||!DB.setStatusDate||!DB.clearStatusDate){ showToast('Not connected to the database',true); if(cb) cb.checked=!want; return; }
+  var p=idOf(r); if(!p){ showToast('This player has no ID',true); if(cb) cb.checked=!want; return; }
+  var cur=(r.status||{})[g]||'';
+  var job;
+  if(want){
+    // Checking ON with no date yet: stamp today and remember it in the history.
+    var today=new Date();
+    var mdy=String(today.getMonth()+1).padStart(2,'0')+'/'+String(today.getDate()).padStart(2,'0')+'/'+today.getFullYear();
+    job=Promise.resolve(DB.setStatusDate(p,g,mdy)).then(function(){ return DB.pushStatusHist?DB.pushStatusHist(p,g,mdy):null; });
+    showToast(g+' set to today');
+  } else {
+    // Unchecking: fall back to the previous date taken, or blank if none.
+    var prev=prevDateFor(r,g,cur);
+    if(prev){
+      job=Promise.resolve(DB.setStatusDate(p,g,prev));
+      showToast(g+' reverted to '+prev);
+    } else {
+      job=Promise.resolve(DB.clearStatusDate(p,g));
+      showToast(g+' date cleared (no earlier date)');
+    }
+  }
+  Promise.resolve(job).then(function(){
+    if(cb) cb.checked=want;
+    // Patch the local row + cell so the change shows immediately (even before
+    // the live snapshot lands, and when offline where it may not land at all).
+    try{
+      r.status=r.status||{};
+      if(want){ if(!r.status[g]) r.status[g]=new Date().toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'}); }
+      else { var keep=prevDateFor(r,g,cur); if(keep) r.status[g]=keep; else delete r.status[g]; }
+      var cell=cb&&cb.parentElement;
+      if(cell){
+        cell.className='dcheck '+((r.status&&r.status[g])?ageClass(r.status[g]):'none')+((r.status&&r.status[g])?' checked':'');
+        var tx=cell.querySelector('.dtxt'); if(tx) tx.textContent=(r.status&&r.status[g])||'\u2014';
+      }
+    }catch(e){}
+  }).catch(function(e){
+    if(cb) cb.checked=!want;
+    showToast('Update failed: '+(e&&e.message||e),true);
+  });
+}
 function idOf(r){ return String(r.player_id||r._id||''); }
 function deleteDate(r,group){
   if(!DB||!DB.clearStatusDate){ showToast('Not connected to the database',true); return; }
@@ -267,6 +337,8 @@ function openDateEdit(r,group,val){
     if(!DB||!DB.setStatusDate){ showToast('Not connected to the database',true); return; }
     save.disabled=true;
     Promise.resolve(DB.setStatusDate(idOf(r),group,mdy)).then(function(){
+      return DB.pushStatusHist?DB.pushStatusHist(idOf(r),group,mdy):null;
+    }).then(function(){
       closeModal(); showToast(group+' date updated');
     }).catch(function(e){ save.disabled=false; showToast('Save failed: '+(e&&e.message||e),true); });
   });

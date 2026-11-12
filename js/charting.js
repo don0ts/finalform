@@ -22,7 +22,16 @@ const firebaseConfig = {
 };
 const COLLECTION = "Players";
 let _db = null;
-try { if (window.firebase && firebase.initializeApp){ firebase.initializeApp(firebaseConfig); _db = firebase.firestore(); } }
+try {
+  if (window.firebase && firebase.initializeApp){
+    if (!firebase.apps || !firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    _db = firebase.firestore();
+    // Offline support: cache the last known Players data locally (IndexedDB) so
+    // player search still works with no connection, and edits sync when it returns.
+    try { _db.enablePersistence({synchronizeTabs:true}).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); }
+    catch(e){ console.warn('Offline persistence unavailable:', e); }
+  }
+}
 catch(err){ console.error('Firebase init failed', err); }
 
 // derive the display name from a player document (search is by player_name)

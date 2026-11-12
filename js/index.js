@@ -22,6 +22,113 @@ const EVENT_IDX = SCHEMA.field_row.indexOf('event_date');
 // "José" and "Jose" are treated as the same player and a search for "jose"
 // finds "José". Lowercases, strips diacritics (NFD + combining marks), and trims.
 function _fold(s){ try{ return String(s==null?'':s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }catch(e){ return String(s==null?'':s).toLowerCase().trim(); } }
+/* ===== Charting-style player search engine (shared) =====
+   Same behavior as the charting page: rank a player by how closely the typed
+   term matches its NAME (multi-word, order-independent, accent-insensitive) or
+   its Player ID, and surface the matches as a live suggestion list. */
+function _psMatchRank(name, t){
+  const n=_fold(name);
+  const words=n.split(/\s+/).filter(Boolean);
+  const terms=_fold(t).split(/\s+/).filter(Boolean);
+  if(!terms.length) return -1;
+  if(terms.length===1){
+    const tt=terms[0];
+    if(n.startsWith(tt)) return 0;
+    for(let i=1;i<words.length;i++){ if(words[i].startsWith(tt)) return 1; }
+    if(n.indexOf(tt)>=0) return 2;
+    return -1;
+  }
+  const allPrefix=terms.every(term=>words.some(w=>w.startsWith(term)));
+  if(allPrefix) return 0;
+  const allSub=terms.every(term=>n.indexOf(term)>=0);
+  if(allSub) return 2;
+  return -1;
+}
+function _psMatchIdRank(id, t){
+  const s=_fold(id), tt=_fold(t);
+  if(!s) return -1;
+  if(s===tt||s.startsWith(tt)) return 0;
+  if(s.indexOf(tt)>=0) return 2;
+  return -1;
+}
+// Return DB players matching the term (best rank first, then alphabetical),
+// capped at `limit`. Falls back to the whole list (alphabetical) when empty.
+function searchDbPlayers(term, limit){
+  limit=limit||12;
+  const db=_cdb();
+  let list=(db&&db.players)?(db.players()||[]):[];
+  list=list.slice().sort(function(a,b){ return String(a.player_name||'').localeCompare(String(b.player_name||'')); });
+  const t=String(term||'').trim();
+  if(!t) return list.slice(0,limit);
+  const scored=[];
+  list.forEach(function(d){
+    let r=_psMatchRank(d.player_name, t);
+    const ir=_psMatchIdRank(d.player_id||d._id, t);
+    if(ir>=0 && (r<0||ir<r)) r=ir;
+    if(r>=0) scored.push({d:d,r:r});
+  });
+  scored.sort(function(a,b){ return a.r-b.r || String(a.d.player_name||'').localeCompare(String(b.d.player_name||'')); });
+  return scored.slice(0,limit).map(function(s){ return s.d; });
+}
+// Attach the charting-style suggestion dropdown to an input. `onPick(doc)` is
+// called with the chosen DB player document. Arrow keys / Enter / Escape work
+// exactly like the charting page.
+function attachPlayerSearch(input, onPick, opts){
+  if(!input) return null;
+  opts=opts||{};
+  const box=document.createElement('div');
+  box.className='ps-suggest';
+  box.style.cssText='position:absolute;left:0;right:0;top:100%;z-index:40;margin-top:4px;background:#0b1220;border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 26px rgba(0,0,0,.5);max-height:320px;overflow:auto;display:none';
+  const host=opts.host||input.parentElement||document.body;
+  if(opts.host && host!==input.parentElement){ host.style.position=host.style.position||'relative'; }
+  host.appendChild(box);
+  let items=[], active=-1, open=false, debounce=null;
+  function hide(){ open=false; active=-1; box.style.display='none'; box.innerHTML=''; }
+  function show(){ open=true; box.style.display='block'; }
+  function render(){
+    box.innerHTML='';
+    const db=_cdb();
+    if(!db||!db.players){ const n=document.createElement('div'); n.style.cssText='padding:10px 12px;color:var(--muted);font-size:13px'; n.textContent='Database unavailable (offline?). You can still type a name manually.'; box.appendChild(n); show(); return; }
+    if(!items.length){ const n=document.createElement('div'); n.style.cssText='padding:10px 12px;color:var(--muted);font-size:13px'; n.textContent='No matching players in database.'; box.appendChild(n); show(); return; }
+    items.forEach(function(d,i){
+      const b=document.createElement('button'); b.type='button';
+      b.style.cssText='display:block;width:100%;text-align:left;background:'+(i===active?'#16233c':'transparent')+';border:0;border-bottom:1px solid var(--line);color:var(--txt);padding:9px 12px;cursor:pointer;font-size:14px';
+      const nm=document.createElement('span'); nm.style.fontWeight='600'; nm.textContent=d.player_name||'(no name)';
+      const idl=document.createElement('span'); idl.style.cssText='float:right;color:var(--muted);font-size:12px'; idl.textContent='ID: '+(d.player_id||d._id||'');
+      b.appendChild(nm); b.appendChild(idl);
+      const meta=[];
+      if(d.position) meta.push('Pos: '+d.position);
+      if(d['class']) meta.push('Class: '+d['class']);
+      if(d.bats||d.throws) meta.push('B/T: '+(d.bats||'')+'/'+(d.throws||''));
+      if(d.agent||d.agents) meta.push('Agent: '+(d.agent||d.agents));
+      if(meta.length){ const ml=document.createElement('div'); ml.style.cssText='color:var(--muted);font-size:12px;margin-top:2px'; ml.textContent=meta.join(' \u00b7 '); b.appendChild(ml); }
+      b.addEventListener('mousedown',function(e){ e.preventDefault(); choose(d); });
+      b.addEventListener('mouseenter',function(){ active=i; });
+      box.appendChild(b);
+    });
+    show();
+  }
+  function choose(d){ hide(); input.value=''; if(typeof onPick==='function') onPick(d); }
+  function query(){
+    const term=input.value;
+    if(!term||!term.trim()){ if(debounce) clearTimeout(debounce); items=[]; active=-1; hide(); return; }
+    if(debounce) clearTimeout(debounce);
+    debounce=setTimeout(function(){ items=searchDbPlayers(term,12); active=-1; render(); }, 120);
+  }
+  input.addEventListener('focus',query);
+  input.addEventListener('input',query);
+  input.addEventListener('keydown',function(e){
+    if(!open) return;
+    if(e.key==='ArrowDown'){ e.preventDefault(); if(items.length){ active=(active+1)%items.length; render(); } }
+    else if(e.key==='ArrowUp'){ e.preventDefault(); if(items.length){ active=(active-1+items.length)%items.length; render(); } }
+    else if(e.key==='Enter'){ if(active>=0&&items[active]){ e.preventDefault(); e.stopPropagation(); choose(items[active]); } }
+    else if(e.key==='Escape'){ hide(); }
+  });
+  input.addEventListener('blur',function(){ setTimeout(hide,150); });
+  window.addEventListener('scroll',function(){ if(open) hide(); }, true);
+  window.addEventListener('resize',function(){ if(open) hide(); });
+  return { hide:hide, refresh:query };
+}
 let eventDate='';
 
 // ---- events (each event owns its own list of players; persisted locally) ----
@@ -279,6 +386,7 @@ function addPlayer(){
   if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
   const p=blankPlayer(); if(EVENT_IDX>=0)p[EVENT_IDX]=eventDate;
   players.push(p); current=players.length-1;
+  try{ clearPlayerSearch(); }catch(e){}
   persistEvents(); renderSavedEvents(activeIdx); updateGate();
   renderPlayers(); renderForm();
 }
@@ -396,6 +504,123 @@ function buildValuesControl(p, key){
 function titleCaseStr(s){ return String(s==null?'':s).replace(/\S+/g,function(w){ return w.charAt(0).toUpperCase()+w.slice(1); }); }
 function addPlayerNamed(name){
   return addPlayerFull({name:name});
+}
+/* ===================== Player search engine =====================
+   Same matching behaviour as the charting page: accents are ignored, typed
+   words may be in ANY order, and both the player name and the Player ID are
+   searched. Results are ranked best-first. */
+function normSearch(s){
+  var x=String(s==null?'':s).toLowerCase();
+  try{ x=x.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){}
+  return x;
+}
+function matchRankName(name,t){
+  var n=normSearch(name);
+  var words=n.split(/\s+/).filter(Boolean);
+  var terms=normSearch(t).trim().split(/\s+/).filter(Boolean);
+  if(!terms.length) return -1;
+  if(terms.length===1){
+    var tt=terms[0];
+    if(n.indexOf(tt)===0) return 0;
+    for(var i=1;i<words.length;i++){ if(words[i].indexOf(tt)===0) return 1; }
+    if(n.indexOf(tt)>=0) return 2;
+    return -1;
+  }
+  var allPrefix=terms.every(function(term){ return words.some(function(w){ return w.indexOf(term)===0; }); });
+  if(allPrefix) return 0;
+  var allSub=terms.every(function(term){ return n.indexOf(term)>=0; });
+  if(allSub) return 2;
+  return -1;
+}
+function matchRankId(id,t){
+  var s=normSearch(id), tt=normSearch(t);
+  if(!s) return -1;
+  if(s===tt || s.indexOf(tt)===0) return 0;
+  if(s.indexOf(tt)>=0) return 2;
+  return -1;
+}
+function dbSearchPlayers(term,limit){
+  limit=limit||12;
+  var list=(_cdb()&&_cdb().players())||[];
+  var t=String(term||'').trim();
+  var scored=[];
+  for(var i=0;i<list.length;i++){
+    var d=list[i];
+    var nm=d.player_name||d.name||'';
+    var id=(d.player_id!=null?d.player_id:(d._id||''))+' ';
+    var r=matchRankName(nm,t);
+    var ir=matchRankId(String(id).trim(),t);
+    if(ir>=0 && (r<0||ir<r)) r=ir;
+    if(r>=0) scored.push({d:d,r:r,nm:String(nm)});
+  }
+  scored.sort(function(a,b){ if(a.r!==b.r) return a.r-b.r; return a.nm.localeCompare(b.nm); });
+  return scored.slice(0,limit).map(function(x){ return x.d; });
+}
+function clearPlayerSearch(){
+  var inp=document.getElementById('msSearchPlayer');
+  var box=document.getElementById('msSearchSug');
+  if(inp) inp.value='';
+  if(box){ box.innerHTML=''; box.style.display='none'; }
+}
+function attachMeasurableSearch(){
+  var inp=document.getElementById('msSearchPlayer');
+  if(!inp||inp._wired) return;
+  inp._wired=true;
+  var box=document.getElementById('msSearchSug');
+  var items=[], active=-1;
+  function hide(){ box.style.display='none'; box.innerHTML=''; active=-1; }
+  function render(){
+    box.innerHTML='';
+    if(!items.length){
+      var n=document.createElement('div'); n.className='psnote';
+      n.textContent=(_cdb()?'No matching players in database.':'Database unavailable (offline?).');
+      box.appendChild(n); box.style.display='block'; return;
+    }
+    items.forEach(function(d,i){
+      var b=document.createElement('button'); b.type='button';
+      var nm=document.createElement('span'); nm.textContent=d.player_name||d.name||'(no name)';
+      var idl=document.createElement('span'); idl.className='psid'; idl.textContent='ID: '+(d.player_id!=null?d.player_id:d._id);
+      b.appendChild(nm); b.appendChild(idl);
+      var meta=[];
+      if(d.position) meta.push('Pos: '+d.position);
+      if(d['class']) meta.push('Class: '+d['class']);
+      if(d.agent||d.agents) meta.push('Agent: '+(d.agent||d.agents));
+      if(meta.length){ var ml=document.createElement('span'); ml.className='psmeta'; ml.textContent=meta.join(' \u00b7 '); b.appendChild(ml); }
+      if(i===active) b.classList.add('active');
+      b.addEventListener('mousedown',function(e){ e.preventDefault(); choose(d); });
+      box.appendChild(b);
+    });
+    box.style.display='block';
+  }
+  function choose(d){
+    hide(); inp.value='';
+    var nm=String(d.player_name||d.name||'').trim();
+    var id=(d.player_id!=null?String(d.player_id):String(d._id||'')).trim();
+    if(!nm){ showToast('That profile has no name yet'); return; }
+    // Already on the roster? Just jump to that player.
+    var at=-1;
+    for(var i=0;i<players.length;i++){
+      if((id && PIDCUBS_IDX!==undefined && String(players[i][PIDCUBS_IDX]||'')===id) || _fold(playerName(players[i]))===_fold(nm)){ at=i; break; }
+    }
+    if(at>=0){ current=at; renderForm(); renderPlayers(); renderDataEntry(); showToast('Showing '+nm); return; }
+    addPlayerFull({name:nm,id:id,pos:(d.position&&d.position!=='P')?d.position:'',bats:d.bats&&d.bats!==''?d.bats:'',throws:d.throws&&d.throws!==''?d.throws:'',pitcher:d.position==='P',cls:d['class']||'',dob:d.dob||'',agent:d.agent||d.agents||''});
+    showToast('Added '+nm+' to this event');
+  }
+  function query(){
+    var t=inp.value;
+    if(!t||!t.trim()){ hide(); return; }
+    items=dbSearchPlayers(t,12); active=-1; render();
+  }
+  inp.addEventListener('focus',query);
+  inp.addEventListener('input',query);
+  inp.addEventListener('keydown',function(e){
+    if(box.style.display==='none') return;
+    if(e.key==='ArrowDown'){ e.preventDefault(); if(items.length){ active=(active+1)%items.length; render(); } }
+    else if(e.key==='ArrowUp'){ e.preventDefault(); if(items.length){ active=(active-1+items.length)%items.length; render(); } }
+    else if(e.key==='Enter'){ if(active>=0&&items[active]){ e.preventDefault(); e.stopPropagation(); choose(items[active]); } }
+    else if(e.key==='Escape'){ hide(); }
+  });
+  inp.addEventListener('blur',function(){ setTimeout(hide,150); });
 }
 function addPlayerFull(opt){
   if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
@@ -992,6 +1217,7 @@ function exportCSV(){
 function showToast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800);}
 
 document.getElementById('addPlayerTop').addEventListener('click',promptAddPlayer);
+(function(){ var s=document.getElementById('msSearchPlayer'); if(s) attachMeasurableSearch(); })();
 (function(){ var _ab=document.getElementById('arrangePlayersBtn'); if(_ab) _ab.addEventListener('click',arrangePlayersByPosition); })();
 // Event Date uses a native date-picker (yyyy-mm-dd value), but the app
 // stores dates as mm/dd/yyyy. No live commit: only Create/Edit applies.
@@ -1698,6 +1924,32 @@ document.getElementById('toggleHeader').addEventListener('click',()=>{
   document.getElementById('toggleHeader').textContent=headerHidden?'Show':'Hide';
 });
 document.getElementById('deAddPlayer').addEventListener('click',promptAddDevicePlayer);
+(function(){ if(document.getElementById('deSearchPlayer')) attachDataEntrySearch(); })();
+// "Search a player": charting-style live search. Picking a database player
+// selects that player in the active event (adding them when not yet present),
+// so their Data Entry row is ready to fill in.
+(function(){
+  var box=document.getElementById('deSearchPlayer');
+  if(!box) return;
+  var host=box.parentElement;
+  attachPlayerSearch(box,function(d){
+    if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
+    var pid=(d.player_id||d._id||'')+'', nm=(d.player_name||'')+'';
+    var idx=-1;
+    if(pid && PIDCUBS_IDX!==undefined){ idx=players.findIndex(function(p){ return String(p[PIDCUBS_IDX]||'').trim()===String(pid).trim(); }); }
+    if(idx<0 && nm && NAME_IDX!==undefined){ var lo=_fold(nm); idx=players.findIndex(function(p){ return _fold(p[NAME_IDX])===lo; }); }
+    if(idx<0){
+      // Not in this event yet — create them from the DB record.
+      var rec=_cdb()?((_cdb().players()||[]).filter(function(x){ return String(x.player_id||x._id||'')===pid; })[0]):null;
+      var pos=(rec&&rec.position&&rec.position!=='P')?rec.position:'';
+      addPlayerFull({name:nm,id:pid,pos:pos,bats:(rec&&rec.bats)||'',throws:(rec&&rec.throws)||'',pitcher:!!(rec&&rec.position==='P'),cls:(rec&&rec['class'])||'',dob:(rec&&rec.dob)||'',agent:(rec&&(rec.agent||rec.agents))||''});
+      showToast('Added '+(nm||'player')+' to event');
+    } else {
+      current=idx; persistEvents(); renderSavedEvents(activeIdx); updateGate(); renderPlayers(); renderForm(); renderDataEntry();
+      showToast('Selected '+(nm||'player'));
+    }
+  },{host:host});
+})();
 (function(){var _dm=document.getElementById('deMergePlayers'); if(_dm) _dm.addEventListener('click',openMergePlayersPopup);})();
 
 // ---- Data Entry (device metadata) ----
@@ -1738,6 +1990,22 @@ function playerToDoc(p){
     agent:p._agent||''
   };
 }
+// Strip unset/blank fields out of a DB payload so a field-level merge can only
+// ever ADD or UPDATE a real value — never overwrite an existing saved value
+// with an empty string. Identity fields (player_id/player_name) are always kept
+// so the document stays keyed and addressable, even when blank.
+function _pruneBlankDoc(obj){
+  var keepAlways={player_id:1, player_name:1};
+  var out={};
+  Object.keys(obj||{}).forEach(function(k){
+    if(keepAlways[k]){ out[k]=obj[k]; return; }
+    var v=obj[k];
+    if(v===undefined||v===null) return;
+    if(typeof v==='string' && v.trim()==='') return;
+    out[k]=v;
+  });
+  return out;
+}
 // The Firestore document is keyed by the player's ACTUAL ID (Player ID Cubs).
 // Editing any field re-saves to the SAME document as long as the ID is unchanged,
 // so no duplicate profile is created. A new profile is created only when the
@@ -1761,7 +2029,7 @@ function scheduleDBSync(p){
   clearTimeout(_dbTimers[p._pid]);
   _dbTimers[p._pid]=setTimeout(function(){
     try{
-      _cdb().upsert(id, playerToDoc(p));
+      _cdb().upsert(id, _pruneBlankDoc(playerToDoc(p)));
       // ID changed (temp->real OR real->real): drop the old document so we EDIT
       // the same profile instead of leaving a duplicate behind.
       if(prev && prev!==id){ try{ _cdb().remove(prev); }catch(e){} }
@@ -1934,7 +2202,8 @@ function saveToStatus(silent){
   var dt=(eventDate||'').trim();
   if(!dt){ if(!silent) showToast('Set the event date first'); return; }
   if(!_cdb()){ if(!silent) showToast('Not connected to the database'); return; }
-  var cache=_cdb().players()||[];
+  var db=_cdb();
+  var cache=db.players()||[];
   var n=0;
   players.forEach(function(p){
     if(!playerName(p)) return;
@@ -1954,7 +2223,17 @@ function saveToStatus(silent){
     var status=Object.assign({},existing);
     taken.forEach(function(g){ status[g.name]=dt; });   // "last date taken" = this event's date
     if(clearArm) delete status['Arm Strength'];          // no real arm values (or pitcher): never a date
-    try{ _cdb().upsert(id, Object.assign(playerToDoc(p),{status:status})); n++; }catch(e){}
+    try{
+      _cdb().upsert(id, Object.assign(_pruneBlankDoc(playerToDoc(p)),{status:status}));
+      // Keep a dated history per group so the Status page can step back to the
+      // previous date taken when a group checkbox is turned off.
+      if(db&&db.pushStatusHist){
+        taken.forEach(function(g){
+          try{ Promise.resolve(db.pushStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
+        });
+      }
+      n++;
+    }catch(e){}
   });
   if(!silent) showToast(n?('Saved to Status • '+n+' player'+(n!==1?'s':'')):'No data groups to save yet');
 }
@@ -2606,9 +2885,70 @@ function renderMapIds(data){
     w.appendChild(lb);w.appendChild(inp);box.appendChild(w);
   });
 }
+// Data-entry search: typing in "Search a player" narrows the device cards to
+// that player (same matching rules as the Measurables search), and jumping to
+// the player in the Measurables table is one click away.
+var _deFilter='';
+function attachDataEntrySearch(){
+  var inp=document.getElementById('deSearchPlayer');
+  if(!inp||inp._wired) return;
+  inp._wired=true;
+  var box=document.getElementById('deSearchSug');
+  function hide(){ if(box){ box.style.display='none'; box.innerHTML=''; } }
+  function matching(){
+    var data=events[activeIdx]&&events[activeIdx].data; if(!data) return [];
+    var t=_deFilter; var out=[];
+    DEVICES.forEach(function(dev){
+      (data.devices[dev.key].players||[]).forEach(function(dp){
+        var nm=dp.name||'';
+        if(!t || matchRankName(nm,t)>=0 || matchRankId(String(dp.cubsId||''),t)>=0) out.push({dev:dev.label,dp:dp});
+      });
+    });
+    return out;
+  }
+  function render(){
+    if(!box) return;
+    if(!_deFilter){ hide(); return; }
+    var hits=matching();
+    box.innerHTML='';
+    if(!hits.length){ var n=document.createElement('div'); n.className='psnote'; n.textContent='No players match on this event.'; box.appendChild(n); box.style.display='block'; return; }
+    hits.slice(0,12).forEach(function(h){
+      var b=document.createElement('button'); b.type='button';
+      var nm=document.createElement('span'); nm.textContent=h.dp.name||'(no name)';
+      var ml=document.createElement('span'); ml.className='psmeta'; ml.textContent=h.dev+(h.dp.cubsId?(' \u00b7 ID: '+h.dp.cubsId):'');
+      b.appendChild(nm); b.appendChild(ml);
+      b.addEventListener('mousedown',function(e){
+        e.preventDefault();
+        // Jump to this player in the Measurables table.
+        var at=-1;
+        for(var i=0;i<players.length;i++){
+          var cid=String((PIDCUBS_IDX!==undefined?players[i][PIDCUBS_IDX]:'')||'');
+          if((h.dp.cubsId && cid===String(h.dp.cubsId)) || _fold(playerName(players[i]))===_fold(h.dp.name)){ at=i; break; }
+        }
+        if(at>=0){ current=at; setMode('measurables'); renderForm(); renderPlayers(); showToast('Showing '+(h.dp.name||'player')); }
+        else { showToast('That player is not in the Measurables list yet'); }
+      });
+      box.appendChild(b);
+    });
+    box.style.display='block';
+  }
+  inp.addEventListener('input',function(){ _deFilter=String(inp.value||'').trim(); render(); if(mode==='data') renderDevAccordion(ensureData(events[activeIdx])); });
+  inp.addEventListener('focus',render);
+  inp.addEventListener('blur',function(){ setTimeout(hide,150); });
+  inp.addEventListener('keydown',function(e){ if(e.key==='Escape'){ inp.value=''; _deFilter=''; hide(); if(mode==='data') renderDevAccordion(ensureData(events[activeIdx])); } });
+}
 function renderDevAccordion(data){
   const box=document.getElementById('devAccordion'); if(!box) return; box.innerHTML='';
-  DEVICES.forEach(dev=>{ box.appendChild(deviceSection(dev,data)); });
+  DEVICES.forEach(dev=>{
+    var sec=deviceSection(dev,data);
+    // When searching, hide device sections that have no matching player.
+    if(_deFilter){
+      var arr=(data.devices[dev.key]&&data.devices[dev.key].players)||[];
+      var any=arr.some(function(dp){ return matchRankName(dp.name||'',_deFilter)>=0 || matchRankId(String(dp.cubsId||''),_deFilter)>=0; });
+      if(!any) return;
+    }
+    box.appendChild(sec);
+  });
 }
 function deviceSection(dev,data){
   const arr=data.devices[dev.key].players;
@@ -2663,10 +3003,19 @@ function promptAddDevicePlayer(){
   root.appendChild(elItem('p',{className:'sub2',textContent:'Pick one or more devices, then fill in the player. Account Name follows the player name (except Blast).'}));
   // player name
   root.appendChild(fieldLabel('Player Name'));
-  const nameEl=txtInput('');nameEl.setAttribute('list','mdNameList');nameEl.placeholder='Enter player name';
-  const dl=document.createElement('datalist');dl.id='mdNameList';
-  players.forEach(pl=>{const nm=playerName(pl);if(nm){const o=document.createElement('option');o.value=nm;dl.appendChild(o);}});
-  root.appendChild(nameEl);root.appendChild(dl);
+  const nameWrap=document.createElement('div');nameWrap.style.position='relative';
+  const nameEl=txtInput('');nameEl.placeholder='Enter player name';
+  nameWrap.appendChild(nameEl);
+  root.appendChild(nameWrap);
+  // charting-style live search: picking a database player fills the fields below
+  attachPlayerSearch(nameEl,function(d){
+    nameEl.value=d.player_name||'';
+    idEl.value=d.player_id||d._id||'';
+    accEl.value=d.player_name||''; accTouched=true;
+    agEl.value=(d.agent||d.agents||'');
+    sel.bats=d.bats||''; sel.throws=d.throws||''; sel.tod=sel.tod||getEventTod();
+    root.querySelectorAll('.segtabs').forEach(function(r){ var g=r.dataset.group; if(!g)return; r.querySelectorAll('.segtab').forEach(function(x){ x.classList.toggle('active',x.textContent===sel[g]); }); });
+  },{host:nameWrap});
   // grid: id, account name, account number
   const grid=document.createElement('div');grid.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px';
   const idW=document.createElement('div');idW.appendChild(fieldLabel('ID (Player ID Cubs)'));const idEl=txtInput('');idW.appendChild(idEl);
