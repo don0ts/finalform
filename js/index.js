@@ -79,6 +79,9 @@ function attachPlayerSearch(input, onPick, opts){
   const box=document.createElement('div');
   box.className='ps-suggest';
   box.style.cssText='position:absolute;left:0;right:0;top:100%;z-index:40;margin-top:4px;background:#0b1220;border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 26px rgba(0,0,0,.5);max-height:320px;overflow:auto;display:none';
+  // The floating panel must be as wide as the panel layout (480px), not shrink-wrapped
+  // around its own content, otherwise only the first row looks wide.
+  box.style.width='480px'; box.style.minWidth='480px'; box.style.maxWidth='min(94vw,640px)'; box.style.boxSizing='border-box';
   const host=opts.host||input.parentElement||document.body;
   if(opts.host && host!==input.parentElement){ host.style.position=host.style.position||'relative'; }
   host.appendChild(box);
@@ -93,15 +96,15 @@ function attachPlayerSearch(input, onPick, opts){
     items.forEach(function(d,i){
       const b=document.createElement('button'); b.type='button';
       b.style.cssText='display:block;width:100%;text-align:left;background:'+(i===active?'#16233c':'transparent')+';border:0;border-bottom:1px solid var(--line);color:var(--txt);padding:9px 12px;cursor:pointer;font-size:14px';
-      const nm=document.createElement('span'); nm.style.fontWeight='600'; nm.textContent=d.player_name||'(no name)';
-      const idl=document.createElement('span'); idl.style.cssText='float:right;color:var(--muted);font-size:12px'; idl.textContent='ID: '+(d.player_id||d._id||'');
+      const nm=document.createElement('span'); nm.className='psname'; nm.textContent=d.player_name||'(no name)';
+      const idl=document.createElement('span'); idl.className='psid'; idl.textContent='ID: '+(d.player_id||d._id||'');
       b.appendChild(nm); b.appendChild(idl);
       const meta=[];
       if(d.position) meta.push('Pos: '+d.position);
       if(d['class']) meta.push('Class: '+d['class']);
       if(d.bats||d.throws) meta.push('B/T: '+(d.bats||'')+'/'+(d.throws||''));
       if(d.agent||d.agents) meta.push('Agent: '+(d.agent||d.agents));
-      if(meta.length){ const ml=document.createElement('div'); ml.style.cssText='color:var(--muted);font-size:12px;margin-top:2px'; ml.textContent=meta.join(' \u00b7 '); b.appendChild(ml); }
+      if(meta.length){ const ml=document.createElement('div'); ml.className='psmeta'; ml.textContent=meta.join(' \u00b7 '); b.appendChild(ml); }
       b.addEventListener('mousedown',function(e){ e.preventDefault(); choose(d); });
       b.addEventListener('mouseenter',function(){ active=i; });
       box.appendChild(b);
@@ -612,6 +615,7 @@ function attachMeasurableSearch(){
   var items=[], active=-1;
   function hide(){ box.style.display='none'; box.innerHTML=''; active=-1; }
   function render(){
+    box.style.width='480px'; box.style.minWidth='480px'; box.style.maxWidth='min(94vw,640px)';
     box.innerHTML='';
     if(!items.length){
       var n=document.createElement('div'); n.className='psnote';
@@ -620,7 +624,7 @@ function attachMeasurableSearch(){
     }
     items.forEach(function(d,i){
       var b=document.createElement('button'); b.type='button';
-      var nm=document.createElement('span'); nm.textContent=d.player_name||d.name||'(no name)';
+      var nm=document.createElement('span'); nm.className='psname'; nm.textContent=d.player_name||d.name||'(no name)';
       var idl=document.createElement('span'); idl.className='psid'; idl.textContent='ID: '+(d.player_id!=null?d.player_id:d._id);
       b.appendChild(nm); b.appendChild(idl);
       var meta=[];
@@ -2960,13 +2964,14 @@ function attachDataEntrySearch(){
   }
   function render(){
     if(!box) return;
+    box.style.width='480px'; box.style.minWidth='480px'; box.style.maxWidth='min(94vw,640px)';
     if(!_deFilter){ hide(); return; }
     var hits=matching();
     box.innerHTML='';
     if(!hits.length){ var n=document.createElement('div'); n.className='psnote'; n.textContent='No players match on this event.'; box.appendChild(n); box.style.display='block'; return; }
     hits.slice(0,12).forEach(function(h){
       var b=document.createElement('button'); b.type='button';
-      var nm=document.createElement('span'); nm.textContent=h.dp.name||'(no name)';
+      var nm=document.createElement('span'); nm.className='psname'; nm.textContent=h.dp.name||'(no name)';
       var ml=document.createElement('span'); ml.className='psmeta'; ml.textContent=h.dev+(h.dp.cubsId?(' \u00b7 ID: '+h.dp.cubsId):'');
       b.appendChild(nm); b.appendChild(ml);
       b.addEventListener('mousedown',function(e){
