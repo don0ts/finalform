@@ -173,39 +173,100 @@ function loadEvents(){
 // typing. It only touches events that already have a DB document, so simply
 // opening an event never invents a duplicate in the database, and it writes the
 // same payload shape the manual Save uses.
-var _eventDbTimer=null;
-function scheduleEventDbSync(){
+var _eventDbTimer=null, _eventPushedSig='', _evPushPending=false, _evPushDirty=false;
+// Everything that matters about an event, minus the bookkeeping fields, so we can
+// tell a real edit from a no-op repaint.
+function _eventSig(ev){
+  if(!ev) return '';
+  try{
+    return JSON.stringify([String(ev.name||''),String(ev.date||''),ev.players||[],ev.data||null]);
+  }catch(e){ return String(Date.now()); }
+}
+var _evPushStart=0;
+function scheduleEventDbSync(force){
   var db=_cdb(); if(!db||!db.eventUpsert) return;
   if(!hasActiveEvent()) return;
   var ev=events[activeIdx];
   if(!ev||!ev._dbId) return;                 // only update events already in the DB
   if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return;
-  clearTimeout(_eventDbTimer);
+  // Nothing actually changed since the last successful push -> don't queue a write
+  // (and don't cancel a pending one that carries a real edit).
+  if(!force && _eventSig(ev)===_eventPushedSig) return;
   var _idx=activeIdx;
+  // Keep the SAME pending timer (trailing edge) instead of restarting it, so
+  // continuous typing can't postpone the write indefinitely; the timer reads the
+  // event *when it fires*, so the last value is the one that gets saved.
+  if(_eventDbTimer) return;
+  if(_evPushPending && (Date.now()-_evPushStart)<4000){ _evPushDirty=true; return; }
+  if(_evPushPending){ _evPushPending=false; }
   _eventDbTimer=setTimeout(function(){
-    var cur=events[_idx];
+    _eventDbTimer=null;
+    var cur=events[activeIdx];
     if(!cur||!cur._dbId) return;
     var id=cur._dbId;
     try{
+      var stamp=new Date().toISOString();
+      // Remember the exact moment we push, so an older echo is ignored while this
+      // write is in flight (and just after it lands).
+      _lastLivePushAt=Date.now(); _evPushPending=true; _evPushStart=Date.now();
       Promise.resolve(db.eventUpsert(id,{
         event_id:id,
         name:String(cur.name||''),
         date:String(cur.date||''),
         player_count:(cur.players?cur.players.length:0),
-        data:JSON.stringify(cur,function(k,v){ if(k==='_dbId'||k==='_fromDb') return undefined; return v; }),
-        saved_at:new Date().toISOString()
-      })).then(function(){ _lastLivePush=Date.now(); }).catch(function(){});
+        data:JSON.stringify(cur,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; }),
+        saved_at:stamp
+      })).then(function(){
+        _lastLivePushAt=Date.now(); _lastLivePush=stamp; _evPushPending=false;
+        _eventPushedSig=_eventSig(cur);
+        _setPushedStamp(id, stamp);
+        // Remember exactly what we wrote so an identical echo is a no-op.
+        if(!cur._savedAt||String(cur._savedAt)<stamp) cur._savedAt=stamp;
+        // Edits made while this write was in flight still need to reach the DB.
+        if(_evPushDirty){ _evPushDirty=false; if(hasActiveEvent() && _eventSig(events[activeIdx])!==_eventPushedSig) scheduleEventDbSync(); }
+      }).catch(function(){ _evPushPending=false; });
     }catch(e){}
-  }, 1200);
+  }, 700);
+  return;
 }
-var _lastLivePush=0;
+var _lastLivePush=0, _lastLivePushAt=0;
+// Timestamp used to decide whether an incoming DB copy is OLDER than what this
+// device already has. Every live push records its exact saved_at here, and an
+// edit made on this device also stamps the local event, so the inbound listener
+// can never replace a newer local value (the old 2.5s blanket "ignore" window was
+// time-based only: a change made inside it, like Blast 2 -> 10, was silently
+// dropped until some later edit happened to push again).
 function isLivePushEcho(){
-  // True right after our own write lands, so the inbound listener refreshing the
-  // same event doesn't stomp on what the user is still typing.
-  return (Date.now()-_lastLivePush)<2500;
+  return (Date.now()-_lastLivePushAt)<2500;
+}
+function _evLocalStamp(ev){
+  if(!ev) return 0;
+  if(ev._localStamp) return ev._localStamp;
+  var t=Date.parse(ev._savedAt||'')||0;
+  ev._localStamp=t; return t;
+}
+// The exact saved_at this device last wrote for each event document. A DB copy
+// older than this means our latest edit never fully landed (or is still in
+// flight), so the edit is re-pushed instead of being shown as a rollback.
+var _PUSHED_KEY='measurables_ev_stamps_v1';
+var _pushedStamps=(function(){ try{ return JSON.parse(localStorage.getItem(_PUSHED_KEY)||'{}')||{}; }catch(e){ return {}; } })();
+function _setPushedStamp(id,stamp){
+  if(!id||!stamp) return;
+  if(!_pushedStamps[id]||String(_pushedStamps[id])<String(stamp)) _pushedStamps[id]=stamp;
+  try{ localStorage.setItem(_PUSHED_KEY,JSON.stringify(_pushedStamps)); }catch(e){}
+}
+function _getPushedStamp(id){ return (id&&_pushedStamps[id])?_pushedStamps[id]:''; }
+function _evMarkLocal(ev){
+  // Called on every local edit; slightly ahead of any DB copy we have already seen.
+  if(!ev) return;
+  var now=Date.now();
+  ev._localStamp=Math.max(now,(_evLocalStamp(ev)||0)+1);
+}
+if(typeof window!=='undefined'){
+  window.__evSnapStamp=function(){ return _lastLivePush; };
 }
 function persistEvents(){
-  if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; }
+  if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; _evMarkLocal(events[activeIdx]); }
   try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
   if(hasActiveEvent() && players[current]) scheduleDBSync(players[current]);
   scheduleEventDbSync();
@@ -252,8 +313,23 @@ function renderSavedEvents(sel){
 // after a short window so a genuinely re-created event is not blocked forever.
 var _recentlyRemovedEvents={};
 function _isRecentlyRemoved(id){ var t=_recentlyRemovedEvents[id]; return !!t && (Date.now()-t)<30000; }
-function applyDbEvents(list){
+function applyDbEvents(list, snap){
   if(!Array.isArray(list)) return;
+  // True when this snapshot still contains a doc we have already saved a NEWER
+  // version of. Such a snapshot must not be applied to the event we are editing.
+  var staleOwned=(function(){
+    try{
+      if(!snap||!snap.metadata||snap.metadata.hasPendingWrites) return false;
+      var any=false;
+      list.forEach(function(d){
+        var id=d&&(d.event_id||d._id); if(!id) return;
+        var mine=Date.parse(_getPushedStamp(id)||'')||0;
+        var theirs=Date.parse((d&&d.saved_at)||'')||0;
+        if(mine && theirs && theirs<mine) any=true;
+      });
+      return any;
+    }catch(e){ return false; }
+  })();
   var changed=false;       // local events changed -> persist + refresh dropdown
   var activeChanged=false; // the ACTIVE event's contents changed -> re-render roster
   var refreshed=0;         // existing events whose contents were updated from the cloud
@@ -297,9 +373,26 @@ function applyDbEvents(list){
     if(!hasPayload) return;
     var ev=events[idx];
     var isActive=(activeIdx===idx);
-    // Don't overwrite the active event while the user is editing it, or while a
-    // change we just pushed ourselves is still settling in the database.
-    if(isActive && (popupOpen || isFormFieldFocused() || isLivePushEcho())) return;
+    // Don't let a copy that is OLDER (or the same age) than our local edits win.
+    // This replaces the old blanket timer: an edit made here is stamped locally,
+    // so an echo of an earlier save can never roll it back (Blast 2 -> 10 stays 10).
+    var incStamp=Date.parse((parsed&&parsed.saved_at)||docu.saved_at||'')||0;
+    var myStamp=_evLocalStamp(ev);
+    var pushed=_getPushedStamp(id); var pushedMs=Date.parse(pushed||'')||0;
+    // A stale echo of an earlier save: keep the local value and make sure the
+    // newer version reaches the database instead of being visually rolled back.
+    if(staleOwned && events[activeIdx]===ev && myStamp>incStamp){ scheduleEventDbSync(true); return; }
+    if(incStamp && myStamp && incStamp<=myStamp){
+      // Our local state is newer than what the database holds: keep it, and make
+      // sure the newer version gets written (covers a push that never landed).
+      if(pushedMs && incStamp<pushedMs && hasActiveEvent() && events[activeIdx]===ev) scheduleEventDbSync(true);
+      return;
+    }
+    // A popup editor is modal: the roster underneath must not be swapped out
+    // from under it (the popup still gets refreshed when it closes). But the Data
+    // Entry values ARE what those popups edit, so a newer value arriving from the
+    // database is applied even then -- never skipped just because a dialog is up.
+    var popupNoted=(isActive && popupOpen);
     // Existing event -> MERGE the incoming DB copy into the local one instead of
     // overwriting it, so a player that already has information locally keeps that
     // information and simply gains anything new captured on the other device.
@@ -317,9 +410,13 @@ function applyDbEvents(list){
     var after=JSON.stringify({n:newName,d:newDate,p:merged.players,x:merged.data});
     if(before===after) return; // nothing new for this event
     ev.name=newName; ev.date=newDate; ev.players=merged.players;
+    if(incStamp) ev._localStamp=Math.max(_evLocalStamp(ev)||0, incStamp);
     // Merged Data Entry payload (device links / IDs / Time of Day) so tech captured
     // on another device shows up here without discarding tech captured locally.
     ev.data=merged.data;
+    // Adopt the incoming save stamp so a later identical echo is recognised as
+    // "same version", and so this event is not re-pushed just because it arrived.
+    if(incStamp) ev._savedAt=new Date(incStamp).toISOString();
     changed=true; refreshed++;
     if(isActive){
       // Re-point the live roster reference and refresh the view.
@@ -357,9 +454,16 @@ function applyDbEvents(list){
     try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
     renderSavedEvents(hasActiveEvent()?activeIdx:undefined);
     updateGate();
+    // The roster object may have been swapped by the merge; point the UI at the
+    // live array again so later edits write into the same player objects.
+    if(activeChanged && hasActiveEvent()){ players=events[activeIdx].players; if(current>=players.length) current=Math.max(0,players.length-1); }
     renderPlayers();
-    if(!isFormFieldFocused()) renderForm();
-    if(activeChanged || (hasActiveEvent() && players.length && !isFormFieldFocused())) renderDataEntry();
+    // Repaint both views for a change that came from the database. If the user is
+    // mid-typing in the open form we patch its values in place instead of
+    // rebuilding it, so nothing that changed elsewhere is left stale on screen
+    // while the caret stays exactly where it was.
+    if(isFormFieldFocused()) syncFormValues(); else renderForm();
+    if(hasActiveEvent() && players.length) renderDataEntry();
     // Visible confirmation that an inbound change actually arrived from another
     // device (helps distinguish a sync problem from a rendering problem).
     if(refreshed>0){ try{ showToast('Synced update from another device'); }catch(e){} }
@@ -1439,7 +1543,10 @@ function _backfillPlayer(mp, op){
     Object.keys(op._dev).forEach(function(k){
       var ov=op._dev[k]; if(ov===undefined) return;
       if(mp._dev[k]===undefined){ mp._dev[k]=ov; return; }
-      if(_isBlankCell(mp._dev[k]) && !_isBlankCell(ov)) mp._dev[k]=ov;
+      // A ticked/un-ticked box and a chosen number are both "real" answers, so
+      // never let a stale false/blank overwrite a newer value here. Only fill a
+      // field that is still empty in the kept player.
+      if(mp._dev[k]==='' && ov!=='') mp._dev[k]=ov;
     });
   }
 }
@@ -1447,6 +1554,35 @@ function _backfillPlayer(mp, op){
 // and back-filled; device links are remapped to the kept player's _pid.
 // Dedup is purely LOCAL to the selected event(s): no global profile-database
 // lookup is performed. IDs come only from the events being merged.
+// A player's identity may be stamped with a DIFFERENT id on each device (the
+// Cubs ID is filled in later, or the profile synced in before its ID existed),
+// and then the same person arrives from the DB under two keys -- which used to
+// land as TWO roster entries (one holding the old value, one holding the new).
+// Build a name<->id alias map first so both copies resolve to ONE player. Without
+// this the merge keeps the stale copy and the edit looks like it never synced.
+function _aliasMergeKeys(){
+  var idByName={}, nameById={};
+  function take(op){
+    var id=(PIDCUBS_IDX!==undefined && op[PIDCUBS_IDX]!=null)?String(op[PIDCUBS_IDX]).trim().toLowerCase():'';
+    var nm=_fold(op[NAME_IDX]!=null?op[NAME_IDX]:'');
+    if(!nm||!id) return;
+    if(idByName[nm]===undefined) idByName[nm]=id;
+    if(nameById[id]===undefined) nameById[id]=nm;
+  }
+  (players||[]).forEach(take);
+  (selected||[]).forEach(function(ev){ (ev.players||[]).forEach(take); });
+  // One hop each way resolves the common cases (id added later / name corrected).
+  var changed=true, guard=0;
+  while(changed && guard++<3){
+    changed=false;
+    Object.keys(idByName).forEach(function(nm){
+      var id=idByName[nm];
+      var nm2=nameById[id];
+      if(nm2 && nm2!==nm && idByName[nm2]===undefined){ idByName[nm2]=id; changed=true; }
+    });
+  }
+  return {idByName:idByName, nameById:nameById};
+}
 function computeMergedEvent(selected, sameEvent){
   if(sameEvent===undefined) sameEvent=false;
   // When sameEvent is false (merging DISTINCT events), players are deduped only
@@ -1473,6 +1609,8 @@ function computeMergedEvent(selected, sameEvent){
   // (two same-name rows merge as long as one side has no id; two DIFFERENT ids
   // stay separate). Scoped by _scope(ei) so this never bridges distinct events.
   var idByName={};
+  // Cross-copy aliases (only when the same person can appear under different keys).
+  var _alias=(sameEvent?{idByName:{},nameById:{}}:_aliasMergeKeys());
   selected.forEach(function(ev,ei){
     var pre=_scope(ei);
     (ev.players||[]).forEach(function(op){
@@ -1486,7 +1624,10 @@ function computeMergedEvent(selected, sameEvent){
     var id=(PIDCUBS_IDX!==undefined && op[PIDCUBS_IDX]!=null)?String(op[PIDCUBS_IDX]).trim():'';
     if(id) return pre+'id:'+id.toLowerCase();
     var nm=_fold(op[NAME_IDX]);
-    if(nm) return (idByName[pre+nm]!==undefined)?(pre+'id:'+idByName[pre+nm]):(pre+'nm:'+nm);
+    if(nm && idByName[pre+nm]!==undefined) return pre+'id:'+idByName[pre+nm];
+    // No id of its own: adopt the id another copy of this person carries.
+    if(nm && _alias.idByName[nm]!==undefined) return pre+'id:'+_alias.idByName[nm];
+    if(nm) return pre+'nm:'+nm;
     return 'uid:'+(op._pid||(Math.random().toString(36).slice(2)));
   }
   selected.forEach(function(ev,ei){
@@ -1666,10 +1807,13 @@ function doEventMerge(selected, name, date){
   // back and was never pruned, so it co-existed with the merged event forever).
   srcDbIds.forEach(function(id){ _recentlyRemovedEvents[id]=Date.now(); });
   events=events.filter(function(e){ return selected.indexOf(e)<0; });
+  // The merged event inherits the source's DB identity so live sync keeps
+  // updating the SAME document instead of creating a second, unsynced copy.
   events.push(merged);
   setActiveEvent(events.length-1);
   persistEvents();
   closeModal();
+  var _mergedEv=merged;
   var db=_cdb();
   if(db){
     var removals=srcDbIds.map(function(id){ return Promise.resolve(db.eventRemove(id)).catch(function(){}); });
@@ -1680,7 +1824,12 @@ function doEventMerge(selected, name, date){
           event_id:id, name:merged.name, date:merged.date, player_count:merged.players.length,
           data:JSON.stringify(merged,function(k,v){ return (k==='_dbId'||k==='_fromDb')?undefined:v; }),
           saved_at:new Date().toISOString()
-        })).then(function(){ merged._dbId=id; if(typeof saveToStatus==='function') saveToStatus(true); });
+        })).then(function(){
+          merged._dbId=id;
+          var live=events[events.indexOf(_mergedEv)]; if(live){ live._dbId=id; }
+          if(activeIdx>=0 && events[activeIdx] && events[activeIdx].name===merged.name && events[activeIdx].date===merged.date) events[activeIdx]._dbId=id;
+          if(typeof saveToStatus==='function') saveToStatus(true);
+        });
       }
     }).then(function(){
       renderSavedEvents(activeIdx);
@@ -1940,20 +2089,21 @@ function saveEventToDB(){
   // If this event was previously saved with a DIFFERENT doc id, remove the
   // old DB doc first so we UPDATE instead of creating a duplicate.
   var oldId=ev._dbId && ev._dbId!==id ? ev._dbId : null;
+  var stamp=new Date().toISOString();
   var payload={
     event_id:id,
     name:String(ev.name||''),
     date:String(ev.date||''),
     player_count:(ev.players?ev.players.length:0),
-    data:JSON.stringify(ev,function(k,v){ if(k==='_dbId'||k==='_fromDb') return undefined; return v; }),
-    saved_at:new Date().toISOString()
+    data:JSON.stringify(ev,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; }),
+    saved_at:stamp
   };
   try{
     var p=oldId ? Promise.resolve(db.eventRemove(oldId)).catch(function(){}) : Promise.resolve();
     p.then(function(){
       return Promise.resolve(db.eventUpsert(id,payload));
     }).then(function(){
-      ev._dbId=id; saveToStatus(true); showToast('Saved to DB \u2022 '+id);
+      ev._dbId=id; _setPushedStamp(id,stamp); _eventPushedSig=_eventSig(ev); saveToStatus(true); showToast('Saved to DB \u2022 '+id);
     }).catch(function(e){ showToast('Save failed: '+(e&&e.message||e)); });
   }catch(e){ showToast('Save failed'); }
 }
@@ -2212,6 +2362,34 @@ function applyDbToRoster(){
     if(mode==='data') renderDataEntry();
   }
 }
+// Refresh the open form's field values from the current player objects WITHOUT
+// rebuilding it (which would drop focus/caret). Only fields the user is not
+// currently editing are touched.
+function syncFormValues(){
+  var f=document.getElementById('form'); if(!f||!hasActiveEvent()) return;
+  var p=players[current]; if(!p) return;
+  var active=document.activeElement;
+  var nodes=f.querySelectorAll('[data-idx]');
+  for(var i=0;i<nodes.length;i++){
+    var el=nodes[i]; if(el===active) continue;
+    var idx=Number(el.getAttribute('data-idx'));
+    if(!isFinite(idx)) continue;
+    var t=(el.tagName||'').toUpperCase();
+    if(t==='SELECT'){
+      var want=String(p[idx]==null?'':p[idx]);
+      if(el.value!==want) el.value=want;
+      continue;
+    }
+    var v=(p[idx]===undefined||p[idx]===null)?'':String(p[idx]);
+    if(t==='INPUT' && el.type==='checkbox'){ var wantC=!!p[idx]; if(el.checked!==wantC) el.checked=wantC; continue; }
+    // Date inputs hold an ISO value while the player stores MM/DD/YYYY.
+    if(t==='INPUT' && el.type==='date') v=mdyToISO(v);
+    if(el.value!==v) el.value=v;
+  }
+  // The device/problem rows are cheap to redraw and carry no caret.
+  try{ renderDevLinks(); }catch(e){}
+}
+if(typeof window!=='undefined') window.__syncFormValues=syncFormValues;
 if(typeof window!=='undefined') window.__applyDbToRoster=applyDbToRoster;
 // ---- Status: per data-group "last date taken" (stored in the DB profile only, NOT in the CSV) ----
 // Data groups map to schema categories; Trackman/Blast/ForcePlates count as taken via their device checkboxes.

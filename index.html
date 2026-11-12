@@ -174,7 +174,9 @@ try {
     const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
     try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
     setConnState('connected','Connected');
-    if(window.__applyDbEvents){ try { window.__applyDbEvents(evs); } catch(e){} }
+    // Hand over the snapshot (not just the doc list) so the app can tell a stale
+    // echo apart from a genuinely newer remote change.
+    if(window.__applyDbEvents){ try { window.__applyDbEvents(evs, snap); } catch(e){} }
   }, err => console.warn("Firestore events listen error:", err));
   window.CubSentryDB = {
     players(){ return cache; },
