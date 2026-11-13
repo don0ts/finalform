@@ -1742,10 +1742,26 @@ function computeMergedEvent(selected, sameEvent){
   var pIds=(primary.data&&primary.data.ids)||{};
   Object.keys(pIds).forEach(function(k){ mergedData.ids[k]=pIds[k]; });
   selected.forEach(function(ev){ var ids=(ev.data&&ev.data.ids)||{}; Object.keys(ids).forEach(function(k){ if((mergedData.ids[k]===undefined||mergedData.ids[k]==='') && ids[k]!=='') mergedData.ids[k]=ids[k]; }); });
+  // Which copy of the event owns each device list.
+  // When two copies of the SAME event are merged (a DB snapshot coming in over
+  // the local copy), a device list must follow the NEWER copy as a WHOLE -- it
+  // is either the row list or empty. Unioning the two copies kept a player
+  // ticked forever: unticking on the other device removes the row there, but
+  // the stale local row was pushed straight back in and the checkbox "resurrected"
+  // itself. Only when merging DISTINCT events (sameEvent === false) are the row
+  // lists combined, because there each list is genuinely new information.
+  var _devOwner={};
+  if(sameEvent){
+    for(var _dvi=selected.length-1;_dvi>=0;_dvi--){
+      var _dvds=(selected[_dvi].data&&selected[_dvi].data.devices)||{};
+      Object.keys(_dvds).forEach(function(dk){ if(!_devOwner[dk]) _devOwner[dk]=_dvi; });
+    }
+  }
   selected.forEach(function(ev,ei){
     var devs=(ev.data&&ev.data.devices)||{};
     Object.keys(devs).forEach(function(dk){
       if(!mergedData.devices[dk]) mergedData.devices[dk]={players:[]};
+      if(sameEvent && _devOwner[dk]!==undefined && _devOwner[dk]!==ei) return;
       var dest=mergedData.devices[dk].players;
       ((devs[dk]&&devs[dk].players)||[]).forEach(function(entry){
     // Custom fields (Name, player_id_cubs, ...) live on the row under their schema
