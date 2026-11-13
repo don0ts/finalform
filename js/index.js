@@ -193,6 +193,18 @@ function _devSig(data){
   if(!data||typeof data!=='object') return data||null;
   try{
     var o={}; Object.keys(data).forEach(function(k){ if(k!=='devices'&&k!=='tod') o[k]=data[k]; });
+    // The Data Entry rows ARE the values shown in that tab, so they must count as
+    // a real change: a rename of a ForcePlates/ArmTrackman account name (or a new
+    // Blast number) keeps the same keys/ids, and without them here the inbound
+    // copy was treated as "nothing new" and never applied.
+    if(data.devices){
+      var _rows={};
+      Object.keys(data.devices).forEach(function(dk){
+        var arr=(data.devices[dk]&&data.devices[dk].players)||[];
+        _rows[dk]=arr.map(function(x){ return [x&&x.linkPid,x&&x.name,x&&x.cubsId,x&&x.id,x&&x.hand,x&&x.accountName,x&&x.accountNumber,x&&x.agent,x&&x.bats,x&&x.throws,x&&x.tod]; });
+      });
+      o._rows=_rows;
+    }
     if(data.devices&&data.devices.blast&&data.devices.blast.players){
       // The Blast number typed on THIS device is echoed inside the row's account
       // name, so the newest number never loses the signature check.
@@ -345,6 +357,60 @@ function renderSavedEvents(sel){
 // after a short window so a genuinely re-created event is not blocked forever.
 var _recentlyRemovedEvents={};
 function _isRecentlyRemoved(id){ var t=_recentlyRemovedEvents[id]; return !!t && (Date.now()-t)<30000; }
+// The newest copy of an event owns the VALUES inside its Data Entry rows.
+// computeMergedEvent keeps this device's player objects first (so nothing that
+// was typed here is lost), but that also meant a NEWER account name / Blast
+// number saved on the other device lost to the older local text (a value was
+// only adopted when ours was empty). Here every row that arrived in the newer
+// copy is authoritative: its texts are copied onto the merged row, the matching
+// player's _dev text is aligned with it, the Blast number is taken from the
+// newer copy, and the Data Entry tab re-renders from the merged data.
+function _adoptIncomingRowValues(merged, localEv, incoming, incEv){
+  try{
+    if(!merged||!merged.data) return;
+    var incDevs=(incoming&&incoming.data&&incoming.data.devices)||{};
+    var mdevs=merged.data.devices||{};
+    var incRows={};
+    Object.keys(incDevs).forEach(function(dk){ incRows[dk]=(incDevs[dk]&&incDevs[dk].players)||[]; });
+    var blastTxt={R:'',L:''};
+    ['trackman','forceplate','timinggates','dynamo'].forEach(function(dk){
+      var rows=(mdevs[dk]&&mdevs[dk].players)||[];
+      var src=incRows[dk]||[];
+      rows.forEach(function(row){
+        if(!row||row.linkPid==null) return;
+        var match=src.filter(function(x){ return x&&x.linkPid===row.linkPid; })[0];
+        if(!match) return;
+        // the newer copy's texts are the current values
+        ['accountName','accountNumber','agent','bats','throws','tod','id','cubsId'].forEach(function(f){
+          if(match[f]!==undefined) row[f]=match[f];
+        });
+        var pid=row.linkPid;
+        (merged.players||[]).forEach(function(mp){
+          if(mp._pid!==pid) return;
+          if(!mp._dev) mp._dev={};
+          mp._dev[dk+'Txt']=match.accountName||'';
+        });
+      });
+    });
+    // Blast: follow the newer copy's numbers for the hands it carries.
+    ['R','L'].forEach(function(h){
+      var mine=(incRows.blast||[]).filter(function(x){ return x&&(x.hand||'')===h; })[0];
+      if(!mine) return;
+      var v=String(mine.accountName||'');
+      if(v.indexOf('Intl ')!==0) return;      // prefix used for a typed Blast number
+      v=v.slice(5); if(v==='') return;
+      blastTxt[h]=v;
+      var pid=mine.linkPid;
+      (merged.players||[]).forEach(function(mp){
+        if(mp._pid!==pid) return;
+        if(!mp._dev) mp._dev={};
+        mp._dev['blastTxt'+h]=v;
+      });
+    });
+    // Re-link any row whose linkPid was remapped onto the kept player.
+    if(blastTxt.R||blastTxt.L){ merged.data._incomingBlastTxt=blastTxt; }
+  }catch(e){}
+}
 function applyDbEvents(list, snap){
   if(!Array.isArray(list)) return;
   // True when this snapshot still contains a doc we have already saved a NEWER
@@ -434,6 +500,7 @@ function applyDbEvents(list, snap){
     var incEv={ name:(incoming.name||''), date:(incoming.date||''), players:incoming.players,
                 data:(incoming.data!==undefined?incoming.data:ev.data) };
     var merged=computeMergedEvent([ev, incEv], true);
+    _adoptIncomingRowValues(merged, ev, incoming, incEv);
     // Preserve a Time of Day set on the other device if we don't have one locally.
     if((!ev.data||!ev.data.tod) && incoming.data && incoming.data.tod && merged.data){ merged.data.tod=incoming.data.tod; }
     var newName=(incoming.name!==undefined?(incoming.name||''):(ev.name||''));
