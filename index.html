@@ -153,6 +153,7 @@ function watchPlayers(col, getDocs, onList){
       var list=snap.docs.map(function(d){ return Object.assign({ _id: d.id }, d.data()); });
       connState('ok','Connected (HTTP refresh)');
       onList(list);
+      if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
     }).catch(function(e){
       console.warn('Players read failed:', e && (e.code||e.message));
       connState('bad','Not connected — '+((e&&(e.code||e.message))||'network blocked'));
@@ -171,6 +172,7 @@ function sdkFail(what, err){
     // Keep the page usable: serve the last known players from local storage.
     var api = {
       ready:false,
+      connect(){ return Promise.reject(new Error('Database not connected')); },
       players(){ try{ return JSON.parse(localStorage.getItem('cubs_last_players')||'[]')||[]; }catch(e){ return []; } },
       onChange(){},
       upsert(){ return Promise.reject(new Error('Database not connected')); },
@@ -217,6 +219,7 @@ else {
         cache = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
         _saveSnap();
         connState('ok','Connected');
+        if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
         listeners.forEach(fn => { try { fn(); } catch(e){} });
         if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
       }, err => { console.warn("Firestore listen error:", err); connState('bad','Disconnected — showing saved data'); listeners.forEach(fn => { try { fn(); } catch(e){} }); });
@@ -225,10 +228,15 @@ else {
         const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
         try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
         connState('ok','Connected');
+        if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
         if(window.__applyDbEvents){ try { window.__applyDbEvents(evs, snap); } catch(e){} }
       }, err => { console.warn("Firestore events listen error:", err); connState('bad','Disconnected — showing saved data'); });
       window.CubSentryDB = {
+        ready:true,
         players(){ return cache; },
+        // Re-tries a write right now (used by the offline event outbox), so a
+        // queued event goes up the moment the database answers again.
+        connect(){ return getDocs(col).then(function(){ return true; }); },
         onChange(fn){ listeners.push(fn); },
         upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
         remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
