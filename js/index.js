@@ -1329,6 +1329,23 @@ function handleChange(srcIdx,p){
   if(NAME_IDX!==undefined && srcIdx===NAME_IDX){ renderPlayers(); syncLinkedNames(p); }
   if(PIDCUBS_IDX!==undefined && srcIdx===PIDCUBS_IDX){ renderPlayers(); syncLinkedNames(p); }
   persistEvents();
+  // A cleared measurement (or arm-strength value) removes that information for
+  // this event, so the Status page must follow immediately.
+  _statusAfterValueChange();
+}
+// Only runs the Status sync when a value was actually EMPTIED, so ordinary
+// typing does not hammer the database while the user fills the form.
+var _statusTouch=null;
+function _statusAfterValueChange(){
+  try{
+    if(typeof hasActiveEvent!=='function'||!hasActiveEvent()) return;
+    if(typeof eventDate!=='string'||!eventDate.trim()) return;
+    if(_statusTouch) clearTimeout(_statusTouch);
+    _statusTouch=setTimeout(function(){
+      _statusTouch=null;
+      try{ saveToStatus(true); }catch(e){}
+    }, 700);
+  }catch(e){}
 }
 
 function expandForPosition(p){
@@ -2616,6 +2633,97 @@ function groupTaken(p,g){
   }
   return g.idxs.some(function(i){ var v=p[i]; return v!==''&&v!==undefined&&v!==null&&v!==false; });
 }
+// ---- Status dates follow the EVENT's content ----
+function _sameDate(a,b){ return _fold(a)===_fold(b) && String(a||'').trim()!==''; }
+function _pname(p){ return _fold(playerName(p)); }
+function _statusValueFilled(v){ return v!==''&&v!==undefined&&v!==null&&v!==false&&String(v).trim()!==''; }
+// Groups that HAVE a value in `p`. For Measurables / Scale the value comes from
+// the player's own fields; for the device groups it comes from that device's
+// Data Entry rows (the checkbox plus the account details they carry).
+function _groupsWithData(p,groups){
+  var out=[];
+  groups.forEach(function(g){
+    if(g.dev){
+      var arr=[];
+      try{ arr=((ensureData(events[activeIdx]).devices[g.dev]||{}).players)||[]; }catch(e){ arr=[]; }
+      var rows=arr.filter(function(x){ return x&&_sameDevIdentity(p,x,g.dev); });
+      var has=rows.some(function(x){ return _statusValueFilled(x.accountName)||_statusValueFilled(x.accountNumber)||_statusValueFilled(x.agent); });
+      if(has) out.push(g);
+      return;
+    }
+    if(g.idxs){ if(g.idxs.some(function(i){ return _statusValueFilled(p[i]); })) out.push(g); }
+  });
+  return out;
+}
+function _dateMs(mdy){
+  var m=String(mdy||'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(!m) return null;
+  return new Date(Number(m[3]),Number(m[1])-1,Number(m[2])).getTime();
+}
+// Scans every OTHER event that has this player and reports, per group, the date
+// of the latest one where the group actually holds data.
+function _latestOtherCaptures(p,excludeDate){
+  var name=_pname(p); if(!name) return {};
+  var cid=(PIDCUBS_IDX!==undefined?String(p[PIDCUBS_IDX]||'').trim().toLowerCase():'');
+  var best={};
+  events.forEach(function(ev){
+    if(!ev||!Array.isArray(ev.players)) return;
+    var dt=String(ev.date||'').trim();
+    if(!dt||_sameDate(dt,excludeDate)) return;
+    var ep=ev.players.filter(function(q){
+      if(!q||_pname(q)!==name) return false;
+      var qid=(PIDCUBS_IDX!==undefined?String(q[PIDCUBS_IDX]||'').trim().toLowerCase():'');
+      return !(cid&&qid&&cid!==qid);
+    })[0];
+    if(!ep) return;
+    var groups=STATUS_GROUPS.filter(function(g){ return !g.dev&&g.idxs; });
+    var found=_groupsWithData(ep,groups).map(function(g){ return g.name; });
+    // Measurables / Scale values travel with the event's player; the device
+    // groups are read from the Data Entry rows of THAT event.
+    STATUS_GROUPS.forEach(function(g){
+      if(!g.dev) return;
+      var arr=((ev.data&&ev.data.devices&&ev.data.devices[g.dev]&&ev.data.devices[g.dev].players)||[]);
+      var has=arr.some(function(x){
+        if(!x) return false;
+        var xnm=_fold(x.name);
+        var xid=String(x.cubsId||'').trim().toLowerCase();
+        var mine=(x.linkPid&&ep._pid&&x.linkPid===ep._pid)||(cid&&xid&&xid===cid)||(xnm&&xnm===name);
+        if(!mine) return false;
+        return _statusValueFilled(x.accountName)||_statusValueFilled(x.accountNumber)||_statusValueFilled(x.agent)||_statusValueFilled(x.id);
+      });
+      if(has) found.push(g.name);
+    });
+    found.forEach(function(nm){
+      var cur=best[nm];
+      var a=_dateMs(dt), b=cur?_dateMs(cur):null;
+      if(cur===undefined||a===null||(b!==null&&a>b)) best[nm]=dt;
+    });
+  });
+  return best;
+}
+// Groups whose data was removed in THIS event: they hold data in no event with
+// an earlier date, i.e. the only capture for them was this event's date.
+function _statusGroupsRemovedHere(p,dt,groups){
+  var latest=_latestOtherCaptures(p,dt), out=[];
+  groups.forEach(function(g){
+    if(groupTaken(p,g)) return;                       // still captured here -> keep dt
+    if(!latest[g.name]) out.push(g);                  // no other event holds it -> blank
+  });
+  return out;
+}
+// Same idea, but reports the date each removed group should fall back to:
+// the latest OTHER event that still holds that group's data ('' = blank).
+function _statusRevertMap(p,dt,excludeNames){
+  var latest=_latestOtherCaptures(p,dt);
+  var skip={}; (excludeNames||[]).forEach(function(n){ skip[n]=1; });
+  var out={};
+  STATUS_GROUPS.forEach(function(g){
+    if(skip[g.name]) return;
+    if(groupTaken(p,g)) return;
+    out[g.name]=latest[g.name]||'';
+  });
+  return out;
+}
 // Stamps each player's "last date taken" per data group in the DB profile.
 // Called on its own or piggy-backed by "Save to DB" (silent=true suppresses its toast).
 function saveToStatus(silent){
@@ -2642,8 +2750,28 @@ function saveToStatus(silent){
     var existing=(cache.find(function(d){return String(d._id)===String(id);})||{}).status||{};
     if(!taken.length && clearArm && !existing['Arm Strength']) return; // nothing to clear
     var status=Object.assign({},existing);
-    taken.forEach(function(g){ status[g.name]=dt; });   // "last date taken" = this event's date
+    // A group whose values were removed HERE (unticked in the event, or the
+    // measurables / Data Entry content deleted) must lose this event's date.
+    // It steps back to the last OTHER event date that group was captured on;
+    // with no earlier date left the timestamp is blanked entirely.
+    var _gone=_statusGroupsRemovedHere(p,dt,STATUS_GROUPS);
+    var _revert=_statusRevertMap(p,dt,clearArm?['Arm Strength']:[]);
+    STATUS_GROUPS.forEach(function(g){
+      var was=String(status[g.name]||'');
+      if(taken.indexOf(g)>=0){ status[g.name]=dt; return; }
+      // This event does not hold the group (unticked device, deleted entry or
+      // cleared measurements). If the stored date is this event's date, the
+      // content for it is gone: revert to the last earlier date that really
+      // holds the data, or blank it when no earlier capture exists.
+      if(was && _sameDate(was,dt)){
+        var back=_revert[g.name];
+        if(back){ status[g.name]=back; } else { delete status[g.name]; }
+      }
+    });
     if(clearArm) delete status['Arm Strength'];          // no real arm values (or pitcher): never a date
+    // Newer event captured later than the current value -> this event is the
+    // latest date for the group, which is exactly the "delete moves it forward"
+    // case; older events never move a date backwards.
     try{
       _cdb().upsert(id, Object.assign(_pruneBlankDoc(playerToDoc(p)),{status:status}));
       // Keep a dated history per group so the Status page can step back to the
@@ -2651,6 +2779,23 @@ function saveToStatus(silent){
       if(db&&db.pushStatusHist){
         taken.forEach(function(g){
           try{ Promise.resolve(db.pushStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
+        });
+        // Drop this event's date from the history of every group that was
+        // cleared here, so a later uncheck can never step back onto a date
+        // that no longer holds any data.
+        _gone.forEach(function(g){
+          if(typeof db.removeStatusHist==='function'){
+            try{ Promise.resolve(db.removeStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
+          }
+        });
+        // A group that does not hold data in this event must not keep this
+        // event's date in its history either, otherwise a later uncheck could
+        // step back onto a date that holds nothing.
+        STATUS_GROUPS.forEach(function(g){
+          if(taken.indexOf(g)>=0) return;
+          if(typeof db.removeStatusHist==='function'){
+            try{ Promise.resolve(db.removeStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
+          }
         });
       }
       n++;
@@ -2670,6 +2815,16 @@ function _sameDevIdentity(p, x, devKey){
   const nm=_fold(playerName(p));
   if(nm && _fold(x.name)===nm) return true;
   return false;
+}
+// Unticking a device (or clearing its values) means this event no longer holds
+// that group, so push the Status page in step right away instead of waiting for
+// the next Save to DB.
+function _statusAfterDevChange(){
+  try{
+    if(typeof hasActiveEvent!=='function'||!hasActiveEvent()) return;
+    if(typeof eventDate!=='string'||!eventDate.trim()) return;
+    saveToStatus(true);
+  }catch(e){}
 }
 function setDeviceLink(p,devKey,on){
   if(!hasActiveEvent()) return;
@@ -2814,6 +2969,7 @@ function buildDeviceRow(p, refresh){
         syncBlast(p); persistEvents(true); if(refresh) refresh();
         renderDevLinks();
         if(mode==='data') renderDataEntry();
+        _statusAfterDevChange();
         return;
       }
       if(extra) extra.style.display=cb.checked?'':'none';
@@ -2822,6 +2978,7 @@ function buildDeviceRow(p, refresh){
       setDeviceLink(p,key,cb.checked);
       persistEvents();
       if(mode==='data') renderDataEntry();
+      _statusAfterDevChange();
     });
   });
   return row;

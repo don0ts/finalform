@@ -6,14 +6,8 @@
    snapshot arrives, and if Firestore is unavailable / blocked by rules.
    ============================================================================= */
 (function(){
-  var firebaseConfig = {
-    apiKey: "AIzaSyDzxseQexlbv0onZH2l5PHNDa5ZKFv5Kz8",
-    authDomain: "cubsentry.web.app",
-    projectId: "cubsentry",
-    storageBucket: "cubsentry.firebasestorage.app",
-    messagingSenderId: "929110932897",
-    appId: "1:929110932897:web:1d91596a2787084a085fe0"
-  };
+  // Settings live in js/firebase_config.js (loaded before this file).
+  var firebaseConfig = window.FIREBASE_CONFIG || {};
   var CHARTING_COLLECTION = 'ChartingSessions';
 
   window._dbSessions = [];

@@ -274,11 +274,13 @@ function setGroupChecked(r,g,want,cb){
   var cur=(r.status||{})[g]||'';
   var job;
   if(want){
-    // Checking ON with no date yet: stamp today and remember it in the history.
-    var today=new Date();
-    var mdy=String(today.getMonth()+1).padStart(2,'0')+'/'+String(today.getDate()).padStart(2,'0')+'/'+today.getFullYear();
+    // Checking ON means "this group HAS a date". Use the player's real event
+    // date (latest one seen in the events this page received) so the sheet is
+    // never stamped with an unrelated "today", and fall back to today only
+    // when no event is known at all.
+    var mdy=_eventDateFor(p)||_todayMDY();
     job=Promise.resolve(DB.setStatusDate(p,g,mdy)).then(function(){ return DB.pushStatusHist?DB.pushStatusHist(p,g,mdy):null; });
-    showToast(g+' set to today');
+    showToast(g+' set to '+mdy);
   } else {
     // Unchecking: fall back to the previous date taken, or blank if none.
     var prev=prevDateFor(r,g,cur);
@@ -296,7 +298,7 @@ function setGroupChecked(r,g,want,cb){
     // the live snapshot lands, and when offline where it may not land at all).
     try{
       r.status=r.status||{};
-      if(want){ if(!r.status[g]) r.status[g]=new Date().toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'}); }
+      if(want){ if(!r.status[g]) r.status[g]=_eventDateFor(r)||_todayMDY(); }
       else { var keep=prevDateFor(r,g,cur); if(keep) r.status[g]=keep; else delete r.status[g]; }
       var cell=cb&&cb.parentElement;
       if(cell){
@@ -310,10 +312,49 @@ function setGroupChecked(r,g,want,cb){
   });
 }
 function idOf(r){ return String(r.player_id||r._id||''); }
+// Latest event date this page knows for a player, used when a group is checked
+// ON by hand (the event content itself is what normally stamps the date).
+function _todayMDY(){
+  var t=new Date();
+  return String(t.getMonth()+1).padStart(2,'0')+'/'+String(t.getDate()).padStart(2,'0')+'/'+t.getFullYear();
+}
+function _eventDateFor(r){
+  var list=[]; try{ list=JSON.parse(localStorage.getItem('cubs_last_events')||'[]')||[]; }catch(e){ list=[]; }
+  var nm=String((r&&r.player_name)||'').trim().toLowerCase();
+  if(!nm) return '';
+  var best='', bestMs=-1;
+  list.forEach(function(ev){
+    if(!ev||!Array.isArray(ev.players)) return;
+    var dt=String(ev.date||'').trim(); if(!parseMDY(dt)) return;
+    var has=ev.players.some(function(q){
+      if(!q) return false;
+      var n=String((q['0']!==undefined?q['0']:q.name)||'').trim().toLowerCase();
+      return n&&n===nm;
+    });
+    if(!has) return;
+    var ms=parseMDY(dt);
+    if(ms>bestMs){ bestMs=ms; best=dt; }
+  });
+  return best;
+}
 function deleteDate(r,group){
   if(!DB||!DB.clearStatusDate){ showToast('Not connected to the database',true); return; }
-  Promise.resolve(DB.clearStatusDate(idOf(r),group)).then(function(){
-    showToast(group+' date cleared');
+  // Deleting this date means "this event's timestamp goes away". Step back to
+  // the last earlier date the group actually holds; blank it when there is
+  // none. Never leave the sheet showing a date that no longer exists.
+  var p=idOf(r); if(!p){ showToast('This player has no ID',true); return; }
+  var cur=(r.status||{})[group]||'';
+  var prev=prevDateFor(r,group,cur);
+  var job=prev
+    ? Promise.resolve(DB.setStatusDate(p,group,prev))
+    : Promise.resolve(DB.clearStatusDate(p,group));
+  Promise.resolve(job).then(function(){
+    try{
+      r.status=r.status||{};
+      if(prev) r.status[group]=prev; else delete r.status[group];
+    }catch(e){}
+    showToast(prev ? (group+' reverted to '+prev) : (group+' date cleared (no earlier date)'));
+    try{ if(typeof render==='function') render(); }catch(e){}
   }).catch(function(e){ showToast('Delete failed: '+(e&&e.message||e),true); });
 }
 function openDateEdit(r,group,val){

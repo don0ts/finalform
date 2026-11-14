@@ -44,57 +44,66 @@
 
 <script src="js/profile_manager.js"></script>
 
+<script src="js/firebase_config.js"></script>
 <script type="module">
 // ==== Firestore connection (same project / collection as the data-entry tool) ====
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+// Settings come from the shared js/firebase_config.js; the SDK is loaded
+// dynamically so a blocked CDN reports a reason instead of spinning forever.
+var FBC = window.FIREBASE_CONFIG || {};
+var SDKV = window.FIREBASE_SDK_MODULAR || '10.12.2';
+var COLLECTION = "Players"; // must match the data-entry tool
 
-// >>> PASTE THE SAME CONFIG YOU USED IN THE DATA-ENTRY TOOL <<<
-// Firebase console -> Project settings -> Your apps -> SDK setup and configuration
-const firebaseConfig = {
-  apiKey: "AIzaSyDzxseQexlbv0onZH2l5PHNDa5ZKFv5Kz8",
-  authDomain: "cubsentry.web.app",
-  projectId: "cubsentry",
-  storageBucket: "cubsentry.firebasestorage.app",
-  messagingSenderId: "929110932897",
-  appId: "1:929110932897:web:1d91596a2787084a085fe0"
-};
-const COLLECTION = "Players"; // must match the data-entry tool
+function setState(txt,cls){ if(window.fbConnState && txt.indexOf('Connected')===0) window.fbConnState('ok',txt); var s=document.getElementById('connState'); if(s){ s.textContent=txt; s.style.color = cls==='ok'?'#22c55e':(cls==='bad'?'#f87171':''); } }
+function offlineApi(){ return { upsert(){ return Promise.reject(new Error('Database not connected')); }, remove(){ return Promise.reject(new Error('Database not connected')); } }; }
 
-function setState(txt,cls){ const s=document.getElementById('connState'); if(s){ s.textContent=txt; s.style.color = cls==='ok'?'#22c55e':(cls==='bad'?'#f87171':''); } }
-
-try {
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
-  // Offline support: cache Firestore data locally so profiles load and edits
-  // queue/sync even without a connection.
-  try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
-  const col = collection(db, COLLECTION);
-  let cache = [];
-  try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
-  window.__setRows = null; // set below via closure
-  const api = {
-    upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
-    remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); }
-  };
-  // hand the API + live data to the non-module script via globals it reads
-  window.CubSentryDB = api;
-  if(window.__setDB) window.__setDB(api);
-  onSnapshot(col, snap => {
-    const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
-    cache = list;
-    try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
-    setState('Connected \u2022 live', 'ok');
-    if(window.__applyData) window.__applyData(list, api);
-  }, err => {
-    console.warn('Firestore listen error:', err);
-    setState('Offline \u2014 showing last known data', 'bad');
-    try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], api); } catch(e){}
-  });
-} catch(e){
-  console.warn('Firebase init failed:', e);
-  setState('Not connected', 'bad');
-  const sb=document.getElementById('statusBox'); if(sb){ sb.className='status err'; sb.style.display=''; sb.textContent='Firebase is not configured. Paste your Firebase keys into this file (the same config used by the data-entry tool) and reload.'; }
+if(!FBC.apiKey || !FBC.projectId){
+  setState('Not connected — firebase config missing (js/firebase_config.js)','bad');
+  var _a0=offlineApi(); window.CubSentryDB=_a0; if(window.__setDB) window.__setDB(_a0);
+} else {
+Promise.all([
+  import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-app.js'),
+  import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-firestore.js')
+]).then(function(mods){
+  var initializeApp=mods[0].initializeApp;
+  var fsMod=mods[1];
+  var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, setDoc=fsMod.setDoc,
+      deleteDoc=fsMod.deleteDoc, onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence;
+  try {
+    const app = initializeApp(FBC);
+    const db = getFirestore(app);
+    // Offline support: cache Firestore data locally so profiles load and edits
+    // queue/sync even without a connection.
+    try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
+    const col = collection(db, COLLECTION);
+    let cache = [];
+    try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
+    const api = {
+      upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
+      remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); }
+    };
+    window.CubSentryDB = api;
+    if(window.__setDB) window.__setDB(api);
+    onSnapshot(col, snap => {
+      const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+      cache = list;
+      try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
+      setState('Connected \u2022 live', 'ok');
+      if(window.__applyData) window.__applyData(list, api);
+    }, err => {
+      console.warn('Firestore listen error:', err);
+      setState('Disconnected — showing saved data', 'bad');
+      try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], api); } catch(e){}
+    });
+  } catch(e){
+    console.warn('Firebase init failed:', e);
+    setState('Not connected — showing saved data', 'bad');
+    var _a=offlineApi(); window.CubSentryDB=_a; if(window.__setDB) window.__setDB(_a);
+  }
+}).catch(function(err){
+  console.warn('Firebase SDK load failed (Profiles)', err);
+  setState('SDK failed to load — check your connection/firewall', 'bad');
+  var _a=offlineApi(); window.CubSentryDB=_a; if(window.__setDB) window.__setDB(_a);
+});
 }
 </script>
 </body>

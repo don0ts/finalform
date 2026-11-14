@@ -47,69 +47,112 @@
 
 <script src="js/status.js"></script>
 
+<script src="js/firebase_config.js"></script>
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, getDoc, setDoc, deleteDoc, updateDoc, deleteField, onSnapshot, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+// Firebase settings come from the one shared file so this page can never drift
+// from Home. The SDK is loaded dynamically: a blocked CDN now shows a clear
+// reason instead of an endless "Connecting…".
+var FBC = window.FIREBASE_CONFIG || {};
+var SDKV = window.FIREBASE_SDK_MODULAR || '10.12.2';
+var COLLECTION = "Players"; // must match the data-entry tool
 
-// >>> PASTE THE SAME CONFIG YOU USED IN THE DATA-ENTRY TOOL <<<
-const firebaseConfig = {
-  apiKey: "AIzaSyDzxseQexlbv0onZH2l5PHNDa5ZKFv5Kz8",
-  authDomain: "cubsentry.web.app",
-  projectId: "cubsentry",
-  storageBucket: "cubsentry.firebasestorage.app",
-  messagingSenderId: "929110932897",
-  appId: "1:929110932897:web:1d91596a2787084a085fe0"
-};
-const COLLECTION = "Players"; // must match the data-entry tool
-
-function setState(txt,cls){ const s=document.getElementById('connState'); if(s){ s.textContent=txt; s.style.color = cls==='ok'?'#22c55e':(cls==='bad'?'#f87171':''); } }
-
-try {
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
-  // Offline support: cache Firestore data locally so the last known status
-  // table loads even without a connection, and edits sync when it returns.
-  try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
-  const col = collection(db, COLLECTION);
-  // Last-known snapshot fallback for the first offline load.
-  try { const _s=localStorage.getItem('cubs_last_players'); if(_s){ const _list=JSON.parse(_s)||[]; if(window.__applyData) window.__applyData(_list, null); } } catch(e){}
-  const api = {
-    ready:true,
-    upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
-    remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
-    setStatusDate(id, group, value){ var u={}; u['status.'+group]=value; return updateDoc(doc(db, COLLECTION, String(id)), u); },
-    clearStatusDate(id, group){ var u={}; u['status.'+group]=deleteField(); return updateDoc(doc(db, COLLECTION, String(id)), u); },
-    // Append a date to that group's dated history (used to step back when a
-    // group checkbox is turned off). Keeps the newest 40, newest first.
-    pushStatusHist(id, group, value){
-      var ref=doc(db, COLLECTION, String(id));
-      return getDoc(ref).then(function(snap){
-        var data=snap.exists()?snap.data():{};
-        var hist=(data.statusHist&&data.statusHist[group])||[];
-        hist=hist.filter(function(x){ return String(x)!==String(value); });
-        hist.unshift(String(value));
-        if(hist.length>40) hist=hist.slice(0,40);
-        var u={}; u['statusHist.'+group]=hist;
-        return updateDoc(ref,u);
-      });
-    }
+function setState(txt,cls){ if(window.fbConnState && (txt.indexOf('Connected')===0 || txt.indexOf('Not connected')===0 || txt.indexOf('SDK')===0 || txt.indexOf('Connecting')===0)) { window.fbConnState(cls==='ok'?'ok':'bad', txt); } var s=document.getElementById('connState'); if(s){ s.textContent=txt; s.style.color = cls==='ok'?'#22c55e':(cls==='bad'?'#f87171':''); } }
+function offlineApi(){
+  var last=null; try{ last=JSON.parse(localStorage.getItem('cubs_last_players')||'null'); }catch(e){}
+  return {
+    ready:false,
+    _offline:true,
+    upsert(){ return Promise.reject(new Error('Database not connected')); },
+    remove(){ return Promise.reject(new Error('Database not connected')); },
+    setStatusDate(){ return Promise.reject(new Error('Database not connected')); },
+    clearStatusDate(){ return Promise.reject(new Error('Database not connected')); },
+    pushStatusHist(){ return Promise.reject(new Error('Database not connected')); },
+    removeStatusHist(){ return Promise.reject(new Error('Database not connected')); }
   };
-  window.CubSentryDB = api;
-  if(window.__setDB) window.__setDB(api);
-  onSnapshot(col, snap => {
-    const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
-    try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
-    setState('Connected \u2022 live', 'ok');
-    if(window.__applyData) window.__applyData(list, api);
-  }, err => {
-    console.warn('Firestore listen error:', err);
-    setState('Offline \u2014 showing last known data', 'bad');
-    try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], api); } catch(e){}
-  });
-} catch(e){
-  console.warn('Firebase init failed:', e);
-  setState('Not connected', 'bad');
-  const sb=document.getElementById('statusBox'); if(sb){ sb.className='status err'; sb.style.display=''; sb.textContent='Firebase is not configured. Paste your Firebase keys into this file (the same config used by the data-entry tool) and reload.'; }
+}
+setState('Connecting…','');
+
+if(!FBC.apiKey || !FBC.projectId){
+  setState('Not connected — firebase config missing (js/firebase_config.js)','bad');
+  var _api0=offlineApi(); window.CubSentryDB=_api0; if(window.__setDB) window.__setDB(_api0);
+  try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], _api0); } catch(e){}
+} else {
+Promise.all([
+  import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-app.js'),
+  import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-firestore.js')
+]).then(function(mods){
+  var appMod=mods[0], fsMod=mods[1];
+  var initializeApp=appMod.initializeApp;
+  var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc,
+      setDoc=fsMod.setDoc, updateDoc=fsMod.updateDoc, deleteDoc=fsMod.deleteDoc, deleteField=fsMod.deleteField,
+      onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence;
+
+  try {
+    const app = initializeApp(FBC);
+    const db = getFirestore(app);
+    // Offline support: cache Firestore data locally so the last known status
+    // table loads even without a connection, and edits sync when it returns.
+    try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
+    const col = collection(db, COLLECTION);
+    // Last-known snapshot fallback for the first offline load.
+    try { const _s=localStorage.getItem('cubs_last_players'); if(_s){ const _list=JSON.parse(_s)||[]; if(window.__applyData) window.__applyData(_list, null); } } catch(e){}
+    const api = {
+      ready:true,
+      upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
+      remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
+      setStatusDate(id, group, value){ var u={}; u['status.'+group]=value; return updateDoc(doc(db, COLLECTION, String(id)), u); },
+      clearStatusDate(id, group){ var u={}; u['status.'+group]=deleteField(); return updateDoc(doc(db, COLLECTION, String(id)), u); },
+      // Append a date to that group's dated history (used to step back when a
+      // group checkbox is turned off). Keeps the newest 40, newest first.
+      pushStatusHist(id, group, value){
+        var ref=doc(db, COLLECTION, String(id));
+        return getDoc(ref).then(function(snap){
+          var data=snap.exists()?snap.data():{};
+          var hist=(data.statusHist&&data.statusHist[group])||[];
+          hist=hist.filter(function(x){ return String(x)!==String(value); });
+          hist.unshift(String(value));
+          if(hist.length>40) hist=hist.slice(0,40);
+          var u={}; u['statusHist.'+group]=hist;
+          return updateDoc(ref,u);
+        });
+      },
+      // Remove one date from a group's history (the content for that date was
+      // deleted, so it must never be stepped back onto).
+      removeStatusHist(id, group, value){
+        var ref=doc(db, COLLECTION, String(id));
+        return getDoc(ref).then(function(snap){
+          var data=snap.exists()?snap.data():{};
+          var hist=(data.statusHist&&data.statusHist[group])||[];
+          hist=hist.filter(function(x){ return String(x)!==String(value); });
+          var u={}; u['statusHist.'+group]=hist;
+          return updateDoc(ref,u);
+        });
+      }
+    };
+    window.CubSentryDB = api;
+    if(window.__setDB) window.__setDB(api);
+    onSnapshot(col, snap => {
+      const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+      try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
+      setState('Connected \u2022 live', 'ok');
+      if(window.__applyData) window.__applyData(list, api);
+    }, err => {
+      console.warn('Firestore listen error:', err);
+      setState('Disconnected — showing saved data', 'bad');
+      try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], api); } catch(e){}
+    });
+  } catch(e){
+    console.warn('Firebase init failed:', e);
+    setState('Not connected — showing saved data', 'bad');
+    var _api=offlineApi(); window.CubSentryDB=_api; if(window.__setDB) window.__setDB(_api);
+    try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], _api); } catch(e2){}
+  }
+}).catch(function(err){
+  console.warn('Firebase SDK load failed (Status)', err);
+  setState('SDK failed to load — check your connection/firewall', 'bad');
+  var _api=offlineApi(); window.CubSentryDB=_api; if(window.__setDB) window.__setDB(_api);
+  try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], _api); } catch(e){}
+});
 }
 </script>
 </body>

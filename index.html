@@ -120,87 +120,115 @@
 <div class="overlay" id="overlay2" style="z-index:60"><div class="modal" id="modal2" style="max-width:560px"></div></div>
 
 <script src="js/index.js"></script>
+<script src="js/firebase_config.js"></script>
 <script type="module">
 // ==== Firestore sync layer (add / edit players -> cloud, live autocomplete cache) ====
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
-// >>> PASTE YOUR CONFIG: Firebase console -> Project settings -> Your apps -> SDK setup <<<
-const firebaseConfig = {
-  apiKey: "AIzaSyDzxseQexlbv0onZH2l5PHNDa5ZKFv5Kz8",
-  authDomain: "cubsentry.web.app",
-  projectId: "cubsentry",
-  storageBucket: "cubsentry.firebasestorage.app",
-  messagingSenderId: "929110932897",
-  appId: "1:929110932897:web:1d91596a2787084a085fe0"
-};
-const COLLECTION = "Players"; // Firestore collection holding player documents
-const EVENTS_COLLECTION = "Events"; // Firestore collection holding saved events
-
-// Small helper to reflect DB connection status in the header indicator.
-function setConnState(state, label){
-  var el=document.getElementById('connState'); if(!el) return;
-  el.textContent=label;
-  el.setAttribute('data-state', state);
+// The SDK is loaded dynamically so a blocked CDN gives a clear message instead of
+// an endless "Connecting…" spinner, and the keys live in one shared file.
+var FBC = window.FIREBASE_CONFIG || {};
+var SDKV = window.FIREBASE_SDK_MODULAR || '10.12.2';
+function connState(kind, msg){ if(window.fbConnState) window.fbConnState(kind, msg); else { var el=document.getElementById('connState'); if(el){ el.textContent=msg; el.setAttribute('data-state', kind==='ok'?'connected':'offline'); } } }
+connState('wait','Connecting…');
+function sdkFail(what, err){
+  console.warn(what, err);
+  connState('bad', 'SDK failed to load — check your connection/firewall');
+  try{
+    if(window.CubSentryDB) return;
+    // Keep the page usable: serve the last known players from local storage.
+    var api = {
+      ready:false,
+      players(){ try{ return JSON.parse(localStorage.getItem('cubs_last_players')||'[]')||[]; }catch(e){ return []; } },
+      onChange(){},
+      upsert(){ return Promise.reject(new Error('Database not connected')); },
+      remove(){ return Promise.reject(new Error('Database not connected')); },
+      pushStatusHist(){ return Promise.reject(new Error('Database not connected')); },
+      removeStatusHist(){ return Promise.reject(new Error('Database not connected')); },
+      eventUpsert(){ return Promise.reject(new Error('Database not connected')); },
+      eventRemove(){ return Promise.reject(new Error('Database not connected')); }
+    };
+    window.CubSentryDB = api;
+  }catch(e){}
 }
-setConnState('connecting','Connecting\u2026');
+if(!FBC.apiKey || !FBC.projectId){
+  // No usable project settings: never leave the indicator spinning.
+  connState('bad', 'Not connected — firebase config missing (js/firebase_config.js)');
+  try { if(!window.CubSentryDB) window.CubSentryDB = { ready:false, players(){ try{ return JSON.parse(localStorage.getItem('cubs_last_players')||'[]')||[]; }catch(e){ return []; } }, onChange(){}, upsert(){ return Promise.reject(new Error('Database not connected')); }, remove(){ return Promise.reject(new Error('Database not connected')); }, pushStatusHist(){ return Promise.reject(new Error('Database not connected')); }, removeStatusHist(){ return Promise.reject(new Error('Database not connected')); }, eventUpsert(){ return Promise.reject(new Error('Database not connected')); }, eventRemove(){ return Promise.reject(new Error('Database not connected')); } }; } catch(e){}
+}
+else {
+  Promise.all([
+    import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-firestore.js')
+  ]).then(function(mods){
+    var appMod = mods[0], fsMod = mods[1];
+    var initializeApp=appMod.initializeApp;
+    var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc,
+        setDoc=fsMod.setDoc, updateDoc=fsMod.updateDoc, deleteDoc=fsMod.deleteDoc, deleteField=fsMod.deleteField,
+        onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence;
 
-try {
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
-  // Offline support: cache the Cloud Firestore data locally (IndexedDB) so the
-  // last saved players + events load even with no connection, and any edits made
-  // while offline sync automatically once the connection returns.
-  try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
-  const col = collection(db, COLLECTION);
-  let cache = [];
-  const listeners = [];
-  // Last-known snapshot fallback (localStorage) — shown on the very first load
-  // while offline, before IndexedDB has anything cached.
-  try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
-  function _saveSnap(){ try { localStorage.setItem('cubs_last_players', JSON.stringify(cache)); } catch(e){} }
-  // live cache -> keeps Add-player autocomplete in sync with the database
-  onSnapshot(col, snap => {
-    cache = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
-    _saveSnap();
-    setConnState('connected','Connected');
-    listeners.forEach(fn => { try { fn(); } catch(e){} });
-    // Live inbound refresh: push external profile edits into the loaded roster.
-    if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
-  }, err => { console.warn("Firestore listen error:", err); setConnState('offline','Disconnected'); listeners.forEach(fn => { try { fn(); } catch(e){} }); });
-  // live cache of saved events -> feeds the main-page "Saved events" dropdown
-  const evCol = collection(db, EVENTS_COLLECTION);
-  onSnapshot(evCol, snap => {
-    const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
-    try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
-    setConnState('connected','Connected');
-    // Hand over the snapshot (not just the doc list) so the app can tell a stale
-    // echo apart from a genuinely newer remote change.
-    if(window.__applyDbEvents){ try { window.__applyDbEvents(evs, snap); } catch(e){} }
-  }, err => console.warn("Firestore events listen error:", err));
-  window.CubSentryDB = {
-    players(){ return cache; },
-    onChange(fn){ listeners.push(fn); },
-    upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
-    remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
-    // Append a date to that group's dated history (newest first, max 40) so the
-    // Status page can step back to the previous date when a box is unchecked.
-    pushStatusHist(id, group, value){
-      var ref=doc(db, COLLECTION, String(id));
-      return getDoc(ref).then(function(snap){
-        var data=snap.exists()?snap.data():{};
-        var hist=(data.statusHist&&data.statusHist[group])||[];
-        hist=hist.filter(function(x){ return String(x)!==String(value); });
-        hist.unshift(String(value));
-        if(hist.length>40) hist=hist.slice(0,40);
-        var u={}; u['statusHist.'+group]=hist;
-        return updateDoc(ref,u);
-      });
-    },
-    eventUpsert(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
-    eventRemove(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
-  };
-} catch(e){ console.warn("Firebase init failed (app still works offline):", e); setConnState('offline','Offline'); }
+    var COLLECTION = "Players";          // Firestore collection holding player documents
+    var EVENTS_COLLECTION = "Events";    // Firestore collection holding saved events
+
+    try {
+      const app = initializeApp(FBC);
+      const db = getFirestore(app);
+      // Offline support: cache so the last players + events load with no connection.
+      try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
+      const col = collection(db, COLLECTION);
+      let cache = [];
+      const listeners = [];
+      try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
+      function _saveSnap(){ try { localStorage.setItem('cubs_last_players', JSON.stringify(cache)); } catch(e){} }
+      onSnapshot(col, snap => {
+        cache = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+        _saveSnap();
+        connState('ok','Connected');
+        listeners.forEach(fn => { try { fn(); } catch(e){} });
+        if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
+      }, err => { console.warn("Firestore listen error:", err); connState('bad','Disconnected — showing saved data'); listeners.forEach(fn => { try { fn(); } catch(e){} }); });
+      const evCol = collection(db, EVENTS_COLLECTION);
+      onSnapshot(evCol, snap => {
+        const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+        try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
+        connState('ok','Connected');
+        if(window.__applyDbEvents){ try { window.__applyDbEvents(evs, snap); } catch(e){} }
+      }, err => { console.warn("Firestore events listen error:", err); connState('bad','Disconnected — showing saved data'); });
+      window.CubSentryDB = {
+        players(){ return cache; },
+        onChange(fn){ listeners.push(fn); },
+        upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
+        remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
+        // Append a date to that group's dated history (newest first, max 40) so the
+        // Status page can step back to the previous date when a box is unchecked.
+        pushStatusHist(id, group, value){
+          var ref=doc(db, COLLECTION, String(id));
+          return getDoc(ref).then(function(snap){
+            var data=snap.exists()?snap.data():{};
+            var hist=(data.statusHist&&data.statusHist[group])||[];
+            hist=hist.filter(function(x){ return String(x)!==String(value); });
+            hist.unshift(String(value));
+            if(hist.length>40) hist=hist.slice(0,40);
+            var u={}; u['statusHist.'+group]=hist;
+            return updateDoc(ref,u);
+          });
+        },
+        // Remove one date from a group's history (the content for that date was
+        // deleted, so it must never be stepped back onto).
+        removeStatusHist(id, group, value){
+          var ref=doc(db, COLLECTION, String(id));
+          return getDoc(ref).then(function(snap){
+            var data=snap.exists()?snap.data():{};
+            var hist=(data.statusHist&&data.statusHist[group])||[];
+            hist=hist.filter(function(x){ return String(x)!==String(value); });
+            var u={}; u['statusHist.'+group]=hist;
+            return updateDoc(ref,u);
+          });
+        },
+        eventUpsert(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
+        eventRemove(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
+      };
+    } catch(e){ console.warn("Firebase init failed (app still works offline):", e); connState('bad','Not connected — working from saved data'); }
+  }).catch(function(err){ sdkFail('Firebase SDK load failed (Home)', err); });
+}
 </script>
 </body>
 </html>

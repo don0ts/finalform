@@ -5,14 +5,8 @@ const $ = id => document.getElementById(id);
 function uid(prefix){ return (prefix||'id') + '_' + Math.random().toString(36).slice(2,9); }
 
 /* ===================== Firebase (player search) ===================== */
-const firebaseConfig = {
-  apiKey: "AIzaSyDzxseQexlbv0onZH2l5PHNDa5ZKFv5Kz8",
-  authDomain: "cubsentry.web.app",
-  projectId: "cubsentry",
-  storageBucket: "cubsentry.firebasestorage.app",
-  messagingSenderId: "929110932897",
-  appId: "1:929110932897:web:1d91596a2787084a085fe0"
-};
+// Settings live in js/firebase_config.js (loaded before this file).
+const firebaseConfig = window.FIREBASE_CONFIG || {};
 const COLLECTION = "Players";
 let _db = null;
 try {
