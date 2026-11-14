@@ -56,6 +56,21 @@ var FBC = window.FIREBASE_CONFIG || {};
 var SDKV = window.FIREBASE_SDK_MODULAR || '10.12.2';
 var COLLECTION = "Players"; // must match the data-entry tool
 
+function sdkLoad(file){
+  var urls=[];
+  if(window.FIREBASE_SDK_LOCAL) urls.push(window.FIREBASE_SDK_LOCAL.replace(/\/$/,'')+'/'+file);
+  urls.push('https://www.gstatic.com/firebasejs/'+SDKV+'/'+file);
+  urls.push('https://cdn.jsdelivr.net/npm/firebase@'+SDKV+'/'+file);
+  urls.push('https://unpkg.com/firebase@'+SDKV+'/'+file);
+  var i=0;
+  function next(){
+    if(i>=urls.length) return Promise.reject(new Error('Could not load '+file+' from any source'));
+    var u=urls[i++];
+    return import(u).catch(function(e){ console.warn('Firebase SDK unavailable at '+u, e && e.message || e); return next(); });
+  }
+  return next();
+}
+
 function setState(txt,cls){ if(window.fbConnState && (txt.indexOf('Connected')===0 || txt.indexOf('Not connected')===0 || txt.indexOf('SDK')===0 || txt.indexOf('Connecting')===0)) { window.fbConnState(cls==='ok'?'ok':'bad', txt); } var s=document.getElementById('connState'); if(s){ s.textContent=txt; s.style.color = cls==='ok'?'#22c55e':(cls==='bad'?'#f87171':''); } }
 function offlineApi(){
   var last=null; try{ last=JSON.parse(localStorage.getItem('cubs_last_players')||'null'); }catch(e){}
@@ -77,13 +92,10 @@ if(!FBC.apiKey || !FBC.projectId){
   var _api0=offlineApi(); window.CubSentryDB=_api0; if(window.__setDB) window.__setDB(_api0);
   try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], _api0); } catch(e){}
 } else {
-Promise.all([
-  import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-app.js'),
-  import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-firestore.js')
-]).then(function(mods){
+Promise.all([sdkLoad('firebase-app.js'), sdkLoad('firebase-firestore.js')]).then(function(mods){
   var appMod=mods[0], fsMod=mods[1];
   var initializeApp=appMod.initializeApp;
-  var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc,
+  var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc, getDocs=fsMod.getDocs,
       setDoc=fsMod.setDoc, updateDoc=fsMod.updateDoc, deleteDoc=fsMod.deleteDoc, deleteField=fsMod.deleteField,
       onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence;
 
@@ -131,7 +143,29 @@ Promise.all([
     };
     window.CubSentryDB = api;
     if(window.__setDB) window.__setDB(api);
+    // Watchdog: Firestore can sit silently "connecting" (blocked websocket,
+    // firewall, suspended tab). If the first snapshot has not arrived by then,
+    // read once over straight HTTP and switch the listener to long-polling so
+    // the page still shows real data instead of a permanent "Connecting…".
+    var _got=false, _watch=setTimeout(function(){ if(_got) return; _probe(); }, 12000);
+    function _probe(){
+      setState('Connecting… (retrying over HTTP)', '');
+      getDocs(col).then(function(snap){
+        _got=true; clearTimeout(_watch);
+        const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+        try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
+        setState('Connected (HTTP refresh)', 'ok');
+        if(window.__applyData) window.__applyData(list, api);
+      }).catch(function(e){
+        console.warn('Probe read failed:', e && (e.code||e.message));
+        // nothing readable either: keep the last known data visible and say why
+        setState('Not connected — ' + ((e && (e.code || e.message)) ? (e.code || e.message) : 'network blocked'), 'bad');
+        try { const _s=localStorage.getItem('cubs_last_players'); if(_s && window.__applyData) window.__applyData(JSON.parse(_s)||[], api); } catch(e2){}
+        setTimeout(function(){ if(!_got) _probe(); }, 20000);
+      });
+    }
     onSnapshot(col, snap => {
+      _got=true; clearTimeout(_watch);
       const list = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
       try { localStorage.setItem('cubs_last_players', JSON.stringify(list)); } catch(e){}
       setState('Connected \u2022 live', 'ok');

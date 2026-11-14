@@ -127,6 +127,40 @@
 // an endless "Connecting…" spinner, and the keys live in one shared file.
 var FBC = window.FIREBASE_CONFIG || {};
 var SDKV = window.FIREBASE_SDK_MODULAR || '10.12.2';
+function sdkLoad(file){
+  var urls=[];
+  if(window.FIREBASE_SDK_LOCAL) urls.push(window.FIREBASE_SDK_LOCAL.replace(/\/$/,'')+'/'+file);
+  urls.push('https://www.gstatic.com/firebasejs/'+SDKV+'/'+file);
+  urls.push('https://cdn.jsdelivr.net/npm/firebase@'+SDKV+'/'+file);
+  urls.push('https://unpkg.com/firebase@'+SDKV+'/'+file);
+  var i=0;
+  function next(){
+    if(i>=urls.length) return Promise.reject(new Error('Could not load '+file+' from any source'));
+    var u=urls[i++];
+    return import(u).catch(function(e){ console.warn('Firebase SDK unavailable at '+u, e && e.message || e); return next(); });
+  }
+  return next();
+}
+// Watchdog for the players listener: if Firestore never delivers a snapshot
+// (blocked websocket / firewall / suspended tab) read once over straight HTTP so
+// the page shows real data instead of sitting on "Connecting…" for ever.
+function watchPlayers(col, getDocs, onList){
+  var got=false;
+  var t=setTimeout(function(){ if(!got) probe(); }, 12000);
+  function probe(){
+    getDocs(col).then(function(snap){
+      got=true; clearTimeout(t);
+      var list=snap.docs.map(function(d){ return Object.assign({ _id: d.id }, d.data()); });
+      connState('ok','Connected (HTTP refresh)');
+      onList(list);
+    }).catch(function(e){
+      console.warn('Players read failed:', e && (e.code||e.message));
+      connState('bad','Not connected — '+((e&&(e.code||e.message))||'network blocked'));
+      setTimeout(function(){ if(!got) probe(); }, 20000);
+    });
+  }
+  return { mark:function(){ got=true; clearTimeout(t); } };
+}
 function connState(kind, msg){ if(window.fbConnState) window.fbConnState(kind, msg); else { var el=document.getElementById('connState'); if(el){ el.textContent=msg; el.setAttribute('data-state', kind==='ok'?'connected':'offline'); } } }
 connState('wait','Connecting…');
 function sdkFail(what, err){
@@ -155,10 +189,7 @@ if(!FBC.apiKey || !FBC.projectId){
   try { if(!window.CubSentryDB) window.CubSentryDB = { ready:false, players(){ try{ return JSON.parse(localStorage.getItem('cubs_last_players')||'[]')||[]; }catch(e){ return []; } }, onChange(){}, upsert(){ return Promise.reject(new Error('Database not connected')); }, remove(){ return Promise.reject(new Error('Database not connected')); }, pushStatusHist(){ return Promise.reject(new Error('Database not connected')); }, removeStatusHist(){ return Promise.reject(new Error('Database not connected')); }, eventUpsert(){ return Promise.reject(new Error('Database not connected')); }, eventRemove(){ return Promise.reject(new Error('Database not connected')); } }; } catch(e){}
 }
 else {
-  Promise.all([
-    import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-app.js'),
-    import('https://www.gstatic.com/firebasejs/'+SDKV+'/firebase-firestore.js')
-  ]).then(function(mods){
+  Promise.all([sdkLoad('firebase-app.js'), sdkLoad('firebase-firestore.js')]).then(function(mods){
     var appMod = mods[0], fsMod = mods[1];
     var initializeApp=appMod.initializeApp;
     var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc,
@@ -178,7 +209,11 @@ else {
       const listeners = [];
       try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
       function _saveSnap(){ try { localStorage.setItem('cubs_last_players', JSON.stringify(cache)); } catch(e){} }
+      var _watch = watchPlayers(col, fsMod.getDocs, function(list){
+        if(!cache.length && list.length){ cache = list; _saveSnap(); listeners.forEach(fn => { try { fn(); } catch(e){} }); if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} } }
+      });
       onSnapshot(col, snap => {
+        _watch.mark();
         cache = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
         _saveSnap();
         connState('ok','Connected');
