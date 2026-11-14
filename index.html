@@ -270,6 +270,45 @@ else {
         eventRemove(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
       };
     } catch(e){ console.warn("Firebase init failed (app still works offline):", e); connState('bad','Not connected — working from saved data'); }
+    // If a tablet ends up with a second, non-writing database object, the page
+    // can look connected while every save is
+    // refused -- which is what 'only my tablet' looks like. Always leave the
+    // object that really writes in place, and let the sync layer retry now.
+    try{
+      var _live=window.CubSentryDB;
+      if(!_live || _live.ready!==true){
+        window.CubSentryDB = { ready:true, players:function(){ return cache; },
+          onChange:function(fn){ listeners.push(fn); },
+          upsert:function(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
+          remove:function(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
+          pushStatusHist:function(id, group, value){
+            var ref=doc(db, COLLECTION, String(id));
+            return getDoc(ref).then(function(snap){
+              var data=snap.exists()?snap.data():{};
+              var hist=(data.statusHist && data.statusHist[group])||[];
+              hist=hist.filter(function(x){ return String(x)!==String(value); });
+              hist.unshift(String(value));
+              if(hist.length>40) hist=hist.slice(0,40);
+              var u={}; u['statusHist.'+group]=hist;
+              return updateDoc(ref,u);
+            });
+          },
+          removeStatusHist:function(id, group, value){
+            var ref=doc(db, COLLECTION, String(id));
+            return getDoc(ref).then(function(snap){
+              var data=snap.exists()?snap.data():{};
+              var hist=(data.statusHist && data.statusHist[group])||[];
+              hist=hist.filter(function(x){ return String(x)!==String(value); });
+              var u={}; u['statusHist.'+group]=hist;
+              return updateDoc(ref,u);
+            });
+          },
+          eventUpsert:function(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
+          eventRemove:function(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
+        };
+      }
+      if(window.__flushEvOutbox){ try{ window.__flushEvOutbox(); }catch(e){} }
+    }catch(e){ console.warn('Firebase ready hand-off failed:', e); }
   }).catch(function(err){ sdkFail('Firebase SDK load failed (Home)', err); });
 }
 </script>

@@ -444,7 +444,20 @@ function _evOutboxNote(){
     }
     var n=_evOutboxCount();
     el.style.display=n?'':'none';
-    el.textContent=n?(n+' event'+(n!==1?'s':'')+' saved on this device - will upload when the DB is back'):'';
+    el.innerHTML='';
+    if(!n){ return; }
+    var txt=document.createElement('span');
+    txt.textContent=n+' event'+(n!==1?'s':'')+' saved on this device - will upload when the DB is back ';
+    el.appendChild(txt);
+    var btn=document.createElement('button');
+    btn.type='button'; btn.textContent='Upload now';
+    btn.style.cssText='background:transparent;border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:700;cursor:pointer';
+    btn.addEventListener('click',function(){
+      if(!_dbUsable()){ showToast('Still not connected - the event stays on this device'); _scheduleEvFlush(5000); return; }
+      flushEventOutbox(); showToast('Uploading event...');
+    });
+    el.appendChild(btn);
+    try{ renderSavedEvents(hasActiveEvent()?activeIdx:undefined); }catch(e){}
   }catch(e){}
 }
 function _evMarkOnlineNotice(id){
@@ -495,7 +508,10 @@ function renderSavedEvents(sel){
     const ev=events[i];
     const o=document.createElement('option');o.value=String(i);
     const n=(ev.players?ev.players.length:0);
-    o.textContent=(ev.name||'(unnamed)')+(ev.date?(' \u2013 '+ev.date):'')+' \u2022 '+n+' player'+(n!==1?'s':'')+(ev._dbId?' \u2022 DB':'');
+    // 'DB' means it is in the database. An event that is not there yet says so    // outright, so a device sitting on an un-uploaded event is obvious instead of
+    // looking identical to a saved one.
+    var _pend=!_dbUsable() ? !!_evOutbox[ev._dbId||eventDocId(ev)] : !!_evOutbox[ev._dbId||eventDocId(ev)];
+    o.textContent=(ev.name||'(unnamed)')+(ev.date?(' \u2013 '+ev.date):'')+' \u2022 '+n+' player'+(n!==1?'s':'')+(ev._dbId?' \u2022 DB':(_pend?' \u2022 not uploaded':''));
     dd.appendChild(o);
   });
   if(sel!==undefined && sel!==null) dd.value=String(sel);
