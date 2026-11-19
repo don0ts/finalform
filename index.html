@@ -225,20 +225,53 @@ else {
         if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
       }, err => { console.warn("Firestore listen error:", err); connState('bad','Disconnected — showing saved data'); listeners.forEach(fn => { try { fn(); } catch(e){} }); });
       const evCol = collection(db, EVENTS_COLLECTION);
+      var _evLastSnap = Date.now();
+      // Fallback read for the Events collection over plain HTTPS. The live channel
+      // can go quiet on a network that stalls streaming connections (the page then
+      // looks frozen on old content); this keeps the event content refreshing.
+      function _restEventList(){
+        if(!FBC.projectId || !FBC.apiKey || typeof fetch !== 'function') return Promise.resolve(null);
+        var url='https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(FBC.projectId)+
+          '/databases/(default)/documents/'+encodeURIComponent(EVENTS_COLLECTION)+
+          '?pageSize=300&key='+encodeURIComponent(FBC.apiKey);
+        return fetch(url).then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); }).then(function(j){
+          return (j.documents||[]).map(function(d){
+            var f=d.fields||{};
+            function g(k){ var v=f[k]||{}; if(v.stringValue!==undefined) return v.stringValue;
+              if(v.integerValue!==undefined) return Number(v.integerValue); return ''; }
+            return { _id:String(d.name||'').split('/').pop(), event_id:g('event_id'), name:g('name'),
+                     date:g('date'), player_count:g('player_count'), data:g('data'), saved_at:g('saved_at') };
+          });
+        });
+      }
       onSnapshot(evCol, snap => {
+        _evLastSnap = Date.now();
         const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
         try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
         connState('ok','Connected');
         if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
         if(window.__applyDbEvents){ try { window.__applyDbEvents(evs, snap); } catch(e){} }
       }, err => { console.warn("Firestore events listen error:", err); connState('bad','Disconnected — showing saved data'); });
+      // If the live channel has not delivered anything for a while, read once over
+      // HTTPS so another device's changes still show up here.
+      setInterval(function(){
+        try{ if(document.hidden) return; }catch(e){}
+        if(Date.now()-_evLastSnap < 15000) return;
+        _restEventList().then(function(list){
+          if(!list) return;
+          _evLastSnap = Date.now();
+          try { localStorage.setItem('cubs_last_events', JSON.stringify(list)); } catch(e){}
+          connState('ok','Connected (HTTP refresh)');
+          if(window.__applyDbEvents){ try { window.__applyDbEvents(list, null); } catch(e){} }
+        }).catch(function(){});
+      }, 7000);
       window.CubSentryDB = {
         ready:true,
         players(){ return cache; },
-        // Re-tries a write right now (used by the offline event outbox), so a
-        // queued event goes up the moment the database answers again.
+        // Re-tries a write right now, so an event whose write failed goes up the
+        // moment the database answers again.
         // Cheap reachability check (one document, not the whole roster) so a
-        // queued event can report "cannot reach the DB" in seconds instead of
+        // failed write can report "cannot reach the DB" in seconds instead of
         // appearing to do nothing.
         // IMPORTANT: this must never read a made-up document id. Firestore
         // reserves ids shaped __like_this__, so such a read is rejected with
