@@ -233,7 +233,7 @@ function scheduleEventDbSync(force){
   // handed to the outbox instead of being dropped, so its edits also land once
   // the connection is back.
   if(!ev._dbId){ _queueEventUpload(ev); return; }
-  if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return;
+  if(!String(ev.date||'').trim() && !String(ev.name||'').trim()) return;
   // Nothing actually changed since the last successful push -> don't queue a write
   // (and don't cancel a pending one that carries a real edit).
   if(!force && _eventSig(ev)===_eventPushedSig) return;
@@ -443,10 +443,21 @@ function _dbProbe(ms){
 // Remember an event that is not in the database yet.
 function _queueEventUpload(ev){
   if(!ev) return;
-  if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return; // date/name still missing
+  // Only a completely empty event is held back. A named-only or dated-only event
+  // is a real event and belongs in the database straight away.
+  if(!String(ev.date||'').trim() && !String(ev.name||'').trim()) return;
   var id=_evResolveDocId(ev);
   if(!id) return;
   _evOutboxQueue(id, ev);
+}
+// Queue one event and try to write it now (0 = immediately, no waiting timer).
+function _evPushSoon(ev, ms){
+  if(!ev) return;
+  var id=_evResolveDocId(ev);
+  if(!id) return;
+  _evOutboxQueue(id, ev);
+  if(ms===0){ try{ flushEventOutbox(); }catch(e){} return; }
+  _scheduleEvFlush(ms===undefined?600:ms);
 }
 function _scheduleEvFlush(ms){
   if(_evFlushTimer) return;
@@ -538,7 +549,7 @@ function flushEventOutbox(skipProbe){
       var en=_evNorm(_evOutbox[id]);
       var ev=_evFind(id);
       if(!ev){ _evOutboxClear(id); return next(); }
-      if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return next(); // still incomplete, keep waiting
+      if(!String(ev.date||'').trim() && !String(ev.name||'').trim()) return next(); // still empty, keep waiting
       if(en.n>=8 && _evPermanent(en.e)) return next();                             // known impossible, stop hammering
       _pushEventDoc(ev, _evResolveDocId(ev)||ev._dbId||id).then(function(wroteId){
         // Clear the entry under its queued key AND under the document it actually
@@ -697,7 +708,7 @@ function renderSavedEvents(sel){
     // 'DB' means it is in the database. An event that is not there yet says so    // outright, so a device sitting on an un-uploaded event is obvious instead of
     // looking identical to a saved one.
     var _pend=!!_evOutbox[_evResolveDocId(ev)];
-    o.textContent=(ev.name||'(unnamed)')+(ev.date?(' \u2013 '+ev.date):'')+' \u2022 '+n+' player'+(n!==1?'s':'')+(ev._dbId?' \u2022 DB':(_pend?' \u2022 not uploaded':''));
+    o.textContent=(ev.name||'(unnamed)')+(ev.date?(' \u2013 '+ev.date):'')+' \u2022 '+n+' player'+(n!==1?'s':'')+(_pend?' \u2022 not uploaded':(ev._dbId?' \u2022 DB':''));
     dd.appendChild(o);
   });
   if(sel!==undefined && sel!==null) dd.value=String(sel);
@@ -837,10 +848,11 @@ function applyDbEvents(list, snap){
     if(staleOwned && events[activeIdx]===ev && myStamp>incStamp){ scheduleEventDbSync(true); return; }
     if(incStamp && myStamp && incStamp<=myStamp){
       // Our local state is newer than what the database holds: keep it, and make
-      // sure the newer version actually gets written. A live push that failed
-      // used to be dropped silently here, which is exactly how an edit could
-      // look saved on the device and then be missing in the database.
-      if(hasActiveEvent() && events[activeIdx]===ev) _queueEventUpload(ev);
+      // sure the newer version actually gets written -- for THIS event, whether or
+      // not it is the one on screen right now. A live push that failed used to be
+      // dropped silently here, which is exactly how an edit could look saved on the
+      // device and then be missing in the database.
+      _queueEventUpload(ev);
       return;
     }
     // A popup editor is modal: the roster underneath must not be swapped out
@@ -874,6 +886,17 @@ function applyDbEvents(list, snap){
     // Adopt the incoming save stamp so a later identical echo is recognised as
     // "same version", and so this event is not re-pushed just because it arrived.
     if(incStamp) ev._savedAt=new Date(incStamp).toISOString();
+    // Both devices have to end up holding the SAME mix. When this merge combined
+    // information the incoming copy did not have (a player, or a Data Entry row
+    // captured only here), the combination is sent back so the other device gains
+    // it too. Only a merge that ADDS something is sent: identical content compares
+    // equal and is never re-pushed, so the two devices cannot bounce the same
+    // event back and forth for ever.
+    try{
+      var incRich=_evRichness({players:(incoming.players||[]),data:(incoming.data||{})});
+      var mixRich=_evRichness({players:(merged.players||[]),data:(merged.data||{})});
+      if(mixRich>incRich) _evPushSoon(ev, 900);
+    }catch(e){}
     changed=true; refreshed++;
     if(isActive){
       // Re-point the live roster reference and refresh the view.
@@ -978,12 +1001,20 @@ function createEvent(){
     var nm=(nIn?nIn.value:'').trim();
     var dt=isoToMDY((dIn?dIn.value:'').trim());
     if(!nm && !dt){ showToast('Enter an event name or date first'); return; }
-    events.push({name:nm,date:dt,players:[]});
+    var ev={name:nm,date:dt,players:[]};
+    // The document identity is pinned the moment the event is created, and the
+    // event is written to the database straight away -- it must exist there
+    // without anyone pressing Save to DB or Upload now. If the write cannot go
+    // through right now the event stays queued on this device and uploads itself
+    // as soon as the database answers.
+    ev._dbId=_evNewDocId(ev);
+    events.push(ev);
     setActiveEvent(events.length-1);
     // Sync top-bar fields to the new event values
     var topDate=document.getElementById('eventDate'); if(topDate) topDate.value=mdyToISO(dt);
     var topName=document.getElementById('eventName'); if(topName) topName.value=nm;
     persistEvents();
+    _evPushSoon(ev, 0);
     showToast('Event created');
     closeModal();
   });
@@ -2642,6 +2673,72 @@ function eventDocId(ev){
   var d=String(ev.date||'').replace(/\D/g,'');
   var nm=String(ev.name||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
   return (d?d:'nodate')+(nm?('_'+nm):'');
+}
+// Pin the document id of a NEWLY created event, once, at creation time.
+// From then on the event keeps that identity whatever it is later named, so a
+// rename can never turn an update into a second document (and a failed write can
+// never orphan the original). A suffix is added only if the id is already taken
+// by a different local event.
+function _evNewDocId(ev){
+  var base=eventDocId(ev)||'event';
+  var used={};
+  for(var i=0;i<events.length;i++){ var o=events[i]; if(o && o!==ev && o._dbId) used[String(o._dbId)]=1; }
+  if(!used[base]) return base;
+  for(var n=2;n<200;n++){ var c=base+'_'+n; if(!used[c]) return c; }
+  return base+'_'+Date.now();
+}
+// Stable identity of a player inside a signature: the Cubs ID when present,
+// otherwise the folded name, otherwise the local row id.
+function _evPKey(p){
+  if(!p) return '';
+  var cid=(PIDCUBS_IDX!==undefined && p[PIDCUBS_IDX]!=null)?String(p[PIDCUBS_IDX]).trim().toLowerCase():'';
+  if(cid) return 'c:'+cid;
+  var nm=(typeof _fold==='function')?_fold(p[NAME_IDX]):String(p[NAME_IDX]||'').trim().toLowerCase();
+  if(nm) return 'n:'+nm;
+  return 'i:'+String(p._pid||'');
+}
+// A stable, ORDER-INDEPENDENT fingerprint of an event's content. Two devices that
+// hold the same mix of players/rows produce the same signature even though they
+// built their lists in a different order.
+function _evContentSig(ev){
+  if(!ev) return '';
+  var parts=[];
+  (ev.players||[]).forEach(function(p){
+    var keys=Object.keys(p||{}).filter(function(k){ return k.charAt(0)!=='_'; }).sort();
+    var kv=keys.map(function(k){ return k+'='+String(p[k]==null?'':p[k]); }).join('\u0001');
+    var dv='';
+    if(p && p._dev){ dv=Object.keys(p._dev).sort().map(function(k){ return k+'='+String(p._dev[k]==null?'':p._dev[k]); }).join('\u0001'); }
+    parts.push('P'+_evPKey(p)+'::'+kv+'::'+dv);
+  });
+  parts.sort();
+  var devs=(ev.data&&ev.data.devices)||{};
+  Object.keys(devs).sort().forEach(function(dk){
+    var rows=((devs[dk]&&devs[dk].players)||[]).map(function(r){
+      var rr=(typeof _normPlayerIdx==='function')?_normPlayerIdx(JSON.parse(JSON.stringify(r||{}))):(r||{});
+      return Object.keys(rr).filter(function(k){ return k.charAt(0)!=='_'; }).sort().map(function(k){ return k+'='+String(rr[k]==null?'':rr[k]); }).join('\u0001');
+    });
+    rows.sort();
+    parts.push('D'+dk+'::'+rows.join('\u0002'));
+  });
+  var ids=(ev.data&&ev.data.ids)||{};
+  parts.push('I'+Object.keys(ids).sort().map(function(k){ return k+'='+String(ids[k]); }).join('\u0001'));
+  parts.push('T'+String((ev.data&&ev.data.tod)||''));
+  return parts.join('\u0003');
+}
+// How MUCH information an event carries (non-blank cells + device rows). Used to
+// decide whether a merge produced something the incoming copy did not have: only
+// then is it worth pushing back. Equal content never pushes, so two devices can
+// never bounce the same event back and forth for ever.
+function _evRichness(ev){
+  if(!ev) return 0;
+  var n=0;
+  (ev.players||[]).forEach(function(p){
+    Object.keys(p||{}).forEach(function(k){ if(k.charAt(0)!=='_' && !_isBlankCell(p[k])) n++; });
+    if(p && p._dev) Object.keys(p._dev).forEach(function(k){ if(!_isBlankCell(p._dev[k])) n++; });
+  });
+  var devs=(ev.data&&ev.data.devices)||{};
+  Object.keys(devs).forEach(function(dk){ n+=((devs[dk]&&devs[dk].players)||[]).length; });
+  return n;
 }
 // Which document does this event belong to? An event that already has a document
 // is always updated in place. For one without a known document, look for a
