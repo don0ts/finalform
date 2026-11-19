@@ -269,7 +269,12 @@ function scheduleEventDbSync(force){
         if(!cur._savedAt||String(cur._savedAt)<stamp) cur._savedAt=stamp;
         // Edits made while this write was in flight still need to reach the DB.
         if(_evPushDirty){ _evPushDirty=false; if(hasActiveEvent() && _eventSig(events[activeIdx])!==_eventPushedSig) scheduleEventDbSync(); }
-      }).catch(function(){ _evPushPending=false; });
+      }).catch(function(){
+        _evPushPending=false;
+        // A failed live write must not lose the edit: hand the event to the retry
+        // queue, which re-sends the same document until it lands.
+        try{ _queueEventUpload(cur); }catch(e){}
+      });
     }catch(e){}
   }, 700);
   return;
@@ -439,7 +444,7 @@ function _dbProbe(ms){
 function _queueEventUpload(ev){
   if(!ev) return;
   if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return; // date/name still missing
-  var id=ev._dbId||eventDocId(ev);
+  var id=_evResolveDocId(ev);
   if(!id) return;
   _evOutboxQueue(id, ev);
 }
@@ -469,31 +474,41 @@ function _evPermanent(code){
 }
 // One write attempt for one event. The shared path for a manual "Save to DB" and
 // an automatic retry, so both send exactly the same payload.
+// An event that already lives in a document is UPDATED in that same document.
+// The document id is never derived again from the current name/date, because
+// doing that on an edit created a second document for an event that already
+// existed (the old one was deleted first, so a failed write could also lose it).
 function _pushEventDoc(ev, id){
   var db=_dbObj(); if(!db) return Promise.reject(new Error('not connected'));
   var stamp=new Date().toISOString();
-  var oldId=(ev._dbId && ev._dbId!==id) ? ev._dbId : null;
+  var target=ev._dbId||id;
+  if(!target) return Promise.reject(_evTagErr(new Error('no event id'),'write'));
+  var oldId=(ev._dbId && id && ev._dbId!==id) ? ev._dbId : null; // real move only
   var json='';
   try{ json=JSON.stringify(ev,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; }); }catch(e){ json='{}'; }
   if(json.length>1000000){
     var big=new Error('too-large'); big.code='write: too-large';
     return Promise.reject(big);
   }
-  var payload={ event_id:id, name:String(ev.name||''), date:String(ev.date||''),
+  var payload={ event_id:target, name:String(ev.name||''), date:String(ev.date||''),
     player_count:(ev.players?ev.players.length:0), data:json, saved_at:stamp };
   _evUploading=true;
+  // Write first, always. Nothing is deleted until the new content is safely stored.
   var work=Promise.resolve()
-    .then(function(){ if(!oldId) return null; return _evRace(db.eventRemove(oldId), EV_WRITE_TIMEOUT, 'remove'); })
-    .then(function(){ return _evRace(db.eventUpsert(id,payload), EV_WRITE_TIMEOUT, 'write'); });
+    .then(function(){ return _evRace(db.eventUpsert(target,payload), EV_WRITE_TIMEOUT, 'write'); });
   return work.then(function(){
     _evUploading=false;
-    ev._dbId=id;
-    _setPushedStamp(id,stamp);
+    ev._dbId=target;
+    _setPushedStamp(target,stamp);
     _eventPushedSig=_eventSig(ev);
     if(!ev._savedAt||String(ev._savedAt)<stamp) ev._savedAt=stamp;
     _evLastErr='';
-    _evOutboxClear(id); if(oldId) _evOutboxClear(oldId);
-    return id;
+    _evOutboxClear(target); if(oldId) _evOutboxClear(oldId);
+    // Only after a successful write: retire a superseded document (legacy path).
+    if(oldId && oldId!==target){
+      try{ Promise.resolve(db.eventRemove(oldId)).catch(function(){}); }catch(e){}
+    }
+    return target;
   }, function(err){ _evUploading=false; throw _evTagErr(err, 'write'); });
 }
 // Send every event that is still waiting, one at a time, with a deadline on each
@@ -525,7 +540,11 @@ function flushEventOutbox(skipProbe){
       if(!ev){ _evOutboxClear(id); return next(); }
       if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return next(); // still incomplete, keep waiting
       if(en.n>=8 && _evPermanent(en.e)) return next();                             // known impossible, stop hammering
-      _pushEventDoc(ev, ev._dbId||id).then(function(){
+      _pushEventDoc(ev, _evResolveDocId(ev)||ev._dbId||id).then(function(wroteId){
+        // Clear the entry under its queued key AND under the document it actually
+        // landed in, so a key that was computed from an older name can never keep
+        // re-sending the same event for ever.
+        _evOutboxClear(id); if(wroteId) _evOutboxClear(wroteId);
         try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
         try{ renderSavedEvents(hasActiveEvent()?activeIdx:undefined); }catch(e){}
         try{ saveToStatus(true); }catch(e){}
@@ -677,7 +696,7 @@ function renderSavedEvents(sel){
     const n=(ev.players?ev.players.length:0);
     // 'DB' means it is in the database. An event that is not there yet says so    // outright, so a device sitting on an un-uploaded event is obvious instead of
     // looking identical to a saved one.
-    var _pend=!_dbUsable() ? !!_evOutbox[ev._dbId||eventDocId(ev)] : !!_evOutbox[ev._dbId||eventDocId(ev)];
+    var _pend=!!_evOutbox[_evResolveDocId(ev)];
     o.textContent=(ev.name||'(unnamed)')+(ev.date?(' \u2013 '+ev.date):'')+' \u2022 '+n+' player'+(n!==1?'s':'')+(ev._dbId?' \u2022 DB':(_pend?' \u2022 not uploaded':''));
     dd.appendChild(o);
   });
@@ -756,7 +775,7 @@ function applyDbEvents(list, snap){
       if(!snap||!snap.metadata||snap.metadata.hasPendingWrites) return false;
       var any=false;
       list.forEach(function(d){
-        var id=d&&(d.event_id||d._id); if(!id) return;
+        var id=d&&(d._id||d.event_id); if(!id) return;
         var mine=Date.parse(_getPushedStamp(id)||'')||0;
         var theirs=Date.parse((d&&d.saved_at)||'')||0;
         if(mine && theirs && theirs<mine) any=true;
@@ -774,10 +793,10 @@ function applyDbEvents(list, snap){
   // DB still has, and (b) clear a recently-removed guard once the delete has
   // actually propagated (the doc no longer comes back in the snapshot).
   var incomingIds={};
-  list.forEach(function(d){ var id=d&&(d.event_id||d._id); if(id) incomingIds[id]=1; });
+  list.forEach(function(d){ var id=d&&(d._id||d.event_id); if(id) incomingIds[id]=1; });
   Object.keys(_recentlyRemovedEvents).forEach(function(id){ if(!incomingIds[id] || !_isRecentlyRemoved(id)) delete _recentlyRemovedEvents[id]; });
   list.forEach(function(docu){
-    var id=docu&&(docu.event_id||docu._id); if(!id) return;
+    var id=docu&&(docu._id||docu.event_id); if(!id) return;
     // Find an existing local event tracking this DB doc id.
     var idx=-1;
     for(var i=0;i<events.length;i++){ if(events[i]._dbId===id){ idx=i; break; } }
@@ -818,8 +837,10 @@ function applyDbEvents(list, snap){
     if(staleOwned && events[activeIdx]===ev && myStamp>incStamp){ scheduleEventDbSync(true); return; }
     if(incStamp && myStamp && incStamp<=myStamp){
       // Our local state is newer than what the database holds: keep it, and make
-      // sure the newer version gets written (covers a push that never landed).
-      if(pushedMs && incStamp<pushedMs && hasActiveEvent() && events[activeIdx]===ev) scheduleEventDbSync(true);
+      // sure the newer version actually gets written. A live push that failed
+      // used to be dropped silently here, which is exactly how an edit could
+      // look saved on the device and then be missing in the database.
+      if(hasActiveEvent() && events[activeIdx]===ev) _queueEventUpload(ev);
       return;
     }
     // A popup editor is modal: the roster underneath must not be swapped out
@@ -1859,22 +1880,23 @@ function editEvent(){
     persistEvents();
     renderSavedEvents(activeIdx);
     updateGate(); renderPlayers(); renderForm(); renderDataEntry();
-    // If this event was already saved to the DB, update it there too (no duplicate).
+    // If this event was already saved to the DB, update THAT document. The name
+    // and date are fields inside it, so an edit is an update -- never a delete
+    // plus a create under a newly derived id.
     if(oldDbId){
-      var newId=eventDocId(ev);
       var db=_cdb();
       if(db&&db.eventUpsert){
-        // Same write path as a manual save / an automatic retry: if the rename
+        // Same write path as a manual save / an automatic retry: if the edit
         // cannot reach the database right now it stays queued instead of being
         // lost with a red toast.
-        _pushEventDoc(ev,newId,{}).then(function(){
+        _pushEventDoc(ev,oldDbId).then(function(){
           saveToStatus(true); showToast('Event updated & saved to DB');
         }).catch(function(e){
-          _evOutboxQueue(ev._dbId||newId);
+          _evOutboxQueue(oldDbId, ev);
           showToast('Event updated on this device \u2014 will upload when connected');
         });
       } else {
-        _evOutboxQueue(ev._dbId||newId);
+        _evOutboxQueue(oldDbId, ev);
         showToast('Event updated \u2014 saved on this device, will upload when connected');
       }
     } else {
@@ -2342,10 +2364,15 @@ function doEventMerge(selected, name, date){
   if(EVENT_IDX>=0) merged.players.forEach(function(p){ p[EVENT_IDX]=date; });
   var srcDbIds=[]; selected.forEach(function(ev){ if(ev._dbId) srcDbIds.push(ev._dbId); });
   var hadDb=srcDbIds.length>0;
+  // The merged event takes over the FIRST source document instead of creating a
+  // fresh one, so other devices keep seeing the same event (an update, not a new
+  // document that leaves the old one behind).
+  var target=srcDbIds.length?srcDbIds[0]:_evResolveDocId(merged);
+  var others=srcDbIds.filter(function(x){ return x!==target; });
   // Guard against the full-collection onSnapshot re-adding a source doc while
   // its delete is still propagating (the old bug: the merged-away source came
   // back and was never pruned, so it co-existed with the merged event forever).
-  srcDbIds.forEach(function(id){ _recentlyRemovedEvents[id]=Date.now(); });
+  others.forEach(function(id){ _recentlyRemovedEvents[id]=Date.now(); });
   events=events.filter(function(e){ return selected.indexOf(e)<0; });
   // The merged event inherits the source's DB identity so live sync keeps
   // updating the SAME document instead of creating a second, unsynced copy.
@@ -2356,22 +2383,19 @@ function doEventMerge(selected, name, date){
   var _mergedEv=merged;
   var db=_cdb();
   if(db){
-    var removals=srcDbIds.map(function(id){ return Promise.resolve(db.eventRemove(id)).catch(function(){}); });
-    Promise.all(removals).then(function(){
-      if(hadDb && db.eventUpsert){
-        var id=eventDocId(merged);
-        return Promise.resolve(db.eventUpsert(id,{
-          event_id:id, name:merged.name, date:merged.date, player_count:merged.players.length,
-          data:JSON.stringify(merged,function(k,v){ return (k==='_dbId'||k==='_fromDb')?undefined:v; }),
-          saved_at:new Date().toISOString()
-        })).then(function(){
-          merged._dbId=id;
-          var live=events[events.indexOf(_mergedEv)]; if(live){ live._dbId=id; }
-          if(activeIdx>=0 && events[activeIdx] && events[activeIdx].name===merged.name && events[activeIdx].date===merged.date) events[activeIdx]._dbId=id;
-          if(typeof saveToStatus==='function') saveToStatus(true);
-        });
-      }
-    }).then(function(){
+    var writeAll=function(){
+      if(!hadDb || !db.eventUpsert) return Promise.resolve(null);
+      // Update the surviving document with the merged content FIRST; the other
+      // source documents are retired only once that write has landed, so a
+      // failed write can never wipe every copy out of the database.
+      return _pushEventDoc(merged, target).then(function(){
+        var live=events[events.indexOf(_mergedEv)]; if(live){ live._dbId=target; }
+        if(activeIdx>=0 && events[activeIdx] && events[activeIdx].name===merged.name && events[activeIdx].date===merged.date) events[activeIdx]._dbId=target;
+        if(typeof saveToStatus==='function') saveToStatus(true);
+        return Promise.all(others.map(function(id){ return Promise.resolve(db.eventRemove(id)).catch(function(){}); }));
+      });
+    };
+    writeAll().then(function(){
       renderSavedEvents(activeIdx);
       showToast('Merged '+selected.length+' events'+(hadDb?' \u2022 DB updated':''));
     }).catch(function(e){ showToast('Merged locally; DB update failed: '+((e&&e.message)||e)); });
@@ -2619,12 +2643,32 @@ function eventDocId(ev){
   var nm=String(ev.name||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
   return (d?d:'nodate')+(nm?('_'+nm):'');
 }
+// Which document does this event belong to? An event that already has a document
+// is always updated in place. For one without a known document, look for a
+// matching document already in the database (same id, or same name + date) so a
+// save updates it instead of creating a second copy of the same event.
+function _evResolveDocId(ev){
+  if(!ev) return '';
+  if(ev._dbId) return String(ev._dbId);
+  var want=eventDocId(ev);
+  var nm=String(ev.name||'').trim(), dt=String(ev.date||'').trim();
+  try{
+    var raw=JSON.parse(localStorage.getItem('cubs_last_events')||'[]')||[];
+    for(var i=0;i<raw.length;i++){
+      var d=raw[i]; if(!d) continue;
+      var did=d._id||d.event_id; if(!did) continue; did=String(did);
+      if(did===want) return did;
+      if(nm && dt && String(d.name||'').trim()===nm && String(d.date||'').trim()===dt) return did;
+    }
+  }catch(e){}
+  return want;
+}
 function saveEventToDB(){
   if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
   var ev=events[activeIdx];
   if(!String(ev.date||'').trim()){ showToast('Set the event date first'); return; }
   if(!String(ev.name||'').trim()){ showToast('Name the event first'); return; }
-  var id=ev._dbId||eventDocId(ev);
+  var id=_evResolveDocId(ev);
   // Not connected is never a dead end: the event stays queued on this device
   // and the same write is re-sent as soon as the database answers again.
   if(!_dbObj()){
