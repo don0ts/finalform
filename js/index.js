@@ -404,13 +404,36 @@ function _dbUsable(){
   if(typeof navigator!=='undefined' && navigator.onLine===false) return false;
   return true;
 }
-// Is the database actually answering? A cheap read tells "no connection" apart
-// from "the write itself was refused", which is what makes the buttons useful.
+// Only a genuine connectivity failure may stop an upload attempt. Anything else
+// the reachability check reports (a rule, a bad argument, a naming problem) is
+// ADVISORY: the app still tries the real write, so the message the user sees is
+// about the event, never about the check.
+function _evConnBlocking(code){
+  var c=String(code||'').toLowerCase();
+  return c.indexOf('unavailable')>=0||c.indexOf('deadline-exceeded')>=0||
+         c.indexOf('internal')>=0||c.indexOf('timeout')>=0||
+         c.indexOf('network-request-failed')>=0||c.indexOf('not connected')>=0||
+         c.indexOf('offline')>=0;
+}
+// Tag a reason with the step that produced it, so 'probe:' and 'write:' are never
+// confused with each other again.
+function _evTagErr(err, stage){
+  var code=(err&&(err.code||err.message))||'error';
+  var e=new Error(String(code));
+  e.code=(stage?stage+': ':'')+String(code);
+  return e;
+}
+// Is the database actually answering? Never rejects: it answers with a result, so
+// a failed check can be treated as advice instead of as a verdict on the event.
 function _dbProbe(ms){
-  var db=_dbObj(); if(!db) return Promise.reject(new Error('not connected'));
+  var db=_dbObj(); if(!db) return Promise.resolve({ ok:false, code:'probe: not connected' });
   var p;
-  try{ p = db.connect ? db.connect() : Promise.resolve(true); }catch(e){ return Promise.reject(e); }
-  return _evRace(p, ms||EV_PROBE_TIMEOUT, 'probe').then(function(){ return true; });
+  try{ p = db.connect ? db.connect() : Promise.resolve(true); }
+  catch(e){ return Promise.resolve({ ok:false, code:'probe: '+((e&&(e.code||e.message))||'failed') }); }
+  return _evRace(p, ms||EV_PROBE_TIMEOUT, 'probe').then(
+    function(){ return { ok:true, code:'' }; },
+    function(err){ return { ok:false, code:'probe: '+((err&&(err.code||err.message))||'failed') }; }
+  );
 }
 // Remember an event that is not in the database yet.
 function _queueEventUpload(ev){
@@ -453,7 +476,7 @@ function _pushEventDoc(ev, id){
   var json='';
   try{ json=JSON.stringify(ev,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; }); }catch(e){ json='{}'; }
   if(json.length>1000000){
-    var big=new Error('too-large'); big.code='too-large';
+    var big=new Error('too-large'); big.code='write: too-large';
     return Promise.reject(big);
   }
   var payload={ event_id:id, name:String(ev.name||''), date:String(ev.date||''),
@@ -471,11 +494,11 @@ function _pushEventDoc(ev, id){
     _evLastErr='';
     _evOutboxClear(id); if(oldId) _evOutboxClear(oldId);
     return id;
-  }, function(err){ _evUploading=false; throw err; });
+  }, function(err){ _evUploading=false; throw _evTagErr(err, 'write'); });
 }
 // Send every event that is still waiting, one at a time, with a deadline on each
 // step and a self-healing guard so one dead write can never freeze the queue.
-function flushEventOutbox(){
+function flushEventOutbox(skipProbe){
   if(_evFlushing){
     // The previous attempt never came back: take the queue over instead of
     // staying wedged for the rest of the session.
@@ -492,7 +515,7 @@ function flushEventOutbox(){
     try{ _evOutboxNote(); }catch(e){}
     if(_evOutboxCount()) _scheduleEvFlush(20000);
   };
-  _dbProbe().then(function(){
+  var runQueue=function(){
     var i=0;
     var next=function(){
       if(i>=ids.length) return finished();
@@ -513,12 +536,27 @@ function flushEventOutbox(){
         // A refusal (too large / not allowed) is not a connection problem: report
         // it and move on to the next event instead of blocking the whole queue.
         if(_evPermanent(why)) return next();
+        // A dead connection stops this round; everything stays queued.
+        if(_evConnBlocking(why)) return finished();
         finished();
       });
     };
     next();
-  }, function(err){
-    // The database is not answering at all: keep everything queued and say so.
+  };
+  // Already checked a moment ago (the button path): send straight away.
+  if(skipProbe){ runQueue(); return; }
+  _dbProbe().then(function(pr){
+    if(!pr.ok && _evConnBlocking(pr.code)){
+      // The database is not answering at all: keep everything queued and say so.
+      _evLastErr=pr.code;
+      _evFlushing=false;
+      try{ _evOutboxNote(); }catch(e){}
+      _scheduleEvFlush(25000);
+      return;
+    }
+    // Any other probe result is only advice: let the real write decide.
+    runQueue();
+  }).catch(function(err){
     _evLastErr=(err&&(err.code||err.message))||'unreachable';
     _evFlushing=false;
     try{ _evOutboxNote(); }catch(e){}
@@ -574,14 +612,16 @@ function uploadEventNow(){
   if(!_dbObj()){ showToast('Database not connected yet - kept on this device'); _scheduleEvFlush(8000); return; }
   if(typeof navigator!=='undefined' && navigator.onLine===false){ showToast('This device is offline - kept on this device'); return; }
   showToast('Uploading event...');
-  _dbProbe().then(function(){
-    flushEventOutbox();
-  }, function(err){
-    var why=(err&&(err.code||err.message))||'unreachable';
-    _evLastErr=String(why);
-    try{ _evOutboxNote(); }catch(e){}
-    showToast('Cannot reach the DB ('+why+') - event stays on this device');
-    _scheduleEvFlush(20000);
+  _dbProbe().then(function(pr){
+    if(!pr.ok && _evConnBlocking(pr.code)){
+      _evLastErr=pr.code;
+      try{ _evOutboxNote(); }catch(e){}
+      showToast('Cannot reach the DB ('+pr.code+') - event stays on this device');
+      _scheduleEvFlush(20000);
+      return;
+    }
+    // Anything else from the check is advice only: send the event for real.
+    flushEventOutbox(true);
   });
 }
 function _evMarkOnlineNotice(id){
@@ -2594,10 +2634,19 @@ function saveEventToDB(){
   }
   showToast("Saving to DB...");
   // Probe first so a dead connection is reported in seconds instead of the
-  // button appearing to do nothing while a write hangs.
-  _dbProbe().then(function(){
-    return _pushEventDoc(ev,id);
-  }).then(function(){
+  // button appearing to do nothing while a write hangs. Only a connectivity
+  // failure stops the attempt: a refusal from the check is ignored, so the real
+  // write decides the outcome and the message always describes the event.
+  _dbProbe().then(function(pr){
+    if(!pr.ok && _evConnBlocking(pr.code)){
+      _evOutboxQueue(id, ev);
+      _evOutboxFail(id, { code: pr.code });
+      showToast('Cannot reach the DB ('+pr.code+') - event kept on this device');
+      return null;
+    }
+    return _pushEventDoc(ev,id).then(function(){ return 'ok'; });
+  }).then(function(res){
+    if(res!=='ok') return;
     saveToStatus(true); showToast('Saved to DB \u2022 '+id);
   }, function(e){
     var why=(e&&(e.code||e.message))||'error';

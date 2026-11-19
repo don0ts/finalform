@@ -196,7 +196,8 @@ else {
     var initializeApp=appMod.initializeApp;
     var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc,
         setDoc=fsMod.setDoc, updateDoc=fsMod.updateDoc, deleteDoc=fsMod.deleteDoc, deleteField=fsMod.deleteField,
-        onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence;
+        onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence,
+        query=fsMod.query, limit=fsMod.limit, getDocs=fsMod.getDocs;
 
     var COLLECTION = "Players";          // Firestore collection holding player documents
     var EVENTS_COLLECTION = "Events";    // Firestore collection holding saved events
@@ -239,7 +240,12 @@ else {
         // Cheap reachability check (one document, not the whole roster) so a
         // queued event can report "cannot reach the DB" in seconds instead of
         // appearing to do nothing.
-        connect(){ return getDoc(doc(db, COLLECTION, '__probe__')).then(function(){ return true; }); },
+        // IMPORTANT: this must never read a made-up document id. Firestore
+        // reserves ids shaped __like_this__, so such a read is rejected with
+        // invalid-argument -- which used to be reported as the event itself being
+        // refused. A one-document query on the Events collection is a real,
+        // cheap check that cannot be invalid for naming reasons.
+        connect(){ return getDocs(query(evCol, limit(1))).then(function(){ return true; }); },
         onChange(fn){ listeners.push(fn); },
         upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
         remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
