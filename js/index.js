@@ -338,24 +338,79 @@ function persistEvents(force){
 // a slow timer while one is waiting). Event/no-op writes are idempotent (same
 // doc id, merge:true), so a retry can never create a duplicate.
 var _EV_OUTBOX_KEY='measurables_ev_outbox_v1';
-var _evOutbox=(function(){ try{ var o=JSON.parse(localStorage.getItem(_EV_OUTBOX_KEY)||'{}'); return (o&&typeof o==='object')?o:{}; }catch(e){ return {}; } })();
-var _evFlushTimer=null, _evFlushing=false;
+// Each waiting event keeps {t:queued-at, n:attempts, e:last reason, nm/dt: identity}
+// so the page can explain WHY it has not gone up instead of looking stuck.
+function _evNorm(v){
+  if(v && typeof v==='object') return {t:+v.t||Date.now(), n:+v.n||0, e:String(v.e||''), nm:String(v.nm||''), dt:String(v.dt||'')};
+  return {t:+v||Date.now(), n:0, e:'', nm:'', dt:''};
+}
+var _evOutbox=(function(){
+  try{
+    var o=JSON.parse(localStorage.getItem(_EV_OUTBOX_KEY)||'{}');
+    if(!o||typeof o!=='object') return {};
+    var out={}; Object.keys(o).forEach(function(k){ out[k]=_evNorm(o[k]); });
+    return out;
+  }catch(e){ return {}; }
+})();
+var _evFlushTimer=null, _evFlushing=false, _evFlushStart=0;
+var _evLastErr='', _evUploading=false;
+// One shared write deadline. A Firestore write does NOT fail while a device has
+// a half-open connection: it simply never answers, and the promise never settles.
+// Without a deadline that single write wedged the whole queue for the rest of the
+// session, so every later retry (and the buttons) did nothing at all.
+var EV_WRITE_TIMEOUT=20000, EV_PROBE_TIMEOUT=9000;
+function _evRace(p, ms, what){
+  return new Promise(function(resolve,reject){
+    var done=false;
+    var t=setTimeout(function(){ if(!done){ done=true; var e=new Error(what||'timeout'); e.code='timeout'; reject(e); } }, ms);
+    Promise.resolve(p).then(function(v){ if(!done){ done=true; clearTimeout(t); resolve(v); } },
+      function(err){ if(!done){ done=true; clearTimeout(t); reject(err); } });
+  });
+}
 function _evOutboxSave(){
   try{
     var now=Date.now();
-    Object.keys(_evOutbox).forEach(function(k){ if(now-(_evOutbox[k]||0)>30*24*3600*1000) delete _evOutbox[k]; });
+    Object.keys(_evOutbox).forEach(function(k){ var en=_evNorm(_evOutbox[k]); if(now-en.t>30*24*3600*1000) delete _evOutbox[k]; else _evOutbox[k]=en; });
     localStorage.setItem(_EV_OUTBOX_KEY,JSON.stringify(_evOutbox));
   }catch(e){}
 }
 function _evOutboxCount(){ return Object.keys(_evOutbox).length; }
-function _evOutboxQueue(id){ if(!id) return; _evOutbox[id]=Date.now(); _evOutboxSave(); try{ _evOutboxNote(); }catch(e){} _scheduleEvFlush(4000); }
-function _evOutboxClear(id){ if(id&&_evOutbox[id]!==undefined){ delete _evOutbox[id]; _evOutboxSave(); try{ _evOutboxNote(); }catch(e){} } }
+function _evSet(id, mut){
+  if(!id) return;
+  var en=_evNorm(_evOutbox[id]);
+  if(mut) mut(en);
+  _evOutbox[id]=en; _evOutboxSave();
+}
+function _evOutboxQueue(id, ev){
+  if(!id) return;
+  _evSet(id, function(en){ en.t=Date.now(); en.e=''; if(ev){ en.nm=String(ev.name||''); en.dt=String(ev.date||''); } });
+  try{ _evOutboxNote(); }catch(e){}
+  _scheduleEvFlush(1500);
+}
+function _evOutboxClear(id){
+  if(id&&_evOutbox[id]!==undefined){ delete _evOutbox[id]; _evOutboxSave(); try{ _evOutboxNote(); }catch(e){} }
+}
+function _evOutboxFail(id, err){
+  var code=(err&&(err.code||err.message))||'error';
+  _evSet(id, function(en){ en.n=(en.n||0)+1; en.e=String(code); en.t=Date.now(); });
+  _evLastErr=String(code);
+  try{ _evOutboxNote(); }catch(e){}
+  return _evLastErr;
+}
+function _dbObj(){ var db=_cdb(); return (db&&db.eventUpsert)?db:null; }
 function _dbUsable(){
-  var db=_cdb();
-  if(!db||!db.eventUpsert) return false;
-  if(db.ready===false) return false;
+  if(!_dbObj()) return false;
+  if(_dbObj().ready===false) return false;
   if(typeof navigator!=='undefined' && navigator.onLine===false) return false;
   return true;
+}
+// Is the database actually answering? A cheap read tells "no connection" apart
+// from "the write itself was refused", which is what makes the buttons useful.
+function _dbProbe(ms){
+  var db=_dbObj(); if(!db) return Promise.reject(new Error('not connected'));
+  var p;
+  try{ p = db.connect ? db.connect() : Promise.resolve(true); }catch(e){ return Promise.reject(e); }
+  return _evRace(p, ms||EV_PROBE_TIMEOUT, 'probe').then(function(){ return true; });
 }
 // Remember an event that is not in the database yet.
 function _queueEventUpload(ev){
@@ -363,68 +418,112 @@ function _queueEventUpload(ev){
   if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return; // date/name still missing
   var id=ev._dbId||eventDocId(ev);
   if(!id) return;
-  _evOutboxQueue(id);
+  _evOutboxQueue(id, ev);
 }
 function _scheduleEvFlush(ms){
   if(_evFlushTimer) return;
   _evFlushTimer=setTimeout(function(){ _evFlushTimer=null; flushEventOutbox(); },(ms===undefined?3000:ms));
 }
-// One write attempt for one event. Kept as the shared path so a manual
-// "Save to DB" and an automatic retry always send exactly the same payload.
-function _pushEventDoc(ev, id, opts){
-  var db=_cdb(); if(!db||!db.eventUpsert) return Promise.reject(new Error('not connected'));
-  opts=opts||{};
+// Find the local event an outbox entry belongs to. The document id can change
+// when the event is renamed, so the name/date recorded at queue time is used as
+// a fallback instead of silently dropping the entry.
+function _evFind(id){
+  var k, ev;
+  for(k=0;k<events.length;k++){ ev=events[k]; if(ev && ev._dbId && ev._dbId===id) return ev; }
+  for(k=0;k<events.length;k++){ ev=events[k]; if(ev && !ev._dbId && eventDocId(ev)===id) return ev; }
+  var en=_evNorm(_evOutbox[id]);
+  if(en.nm && en.dt){
+    for(k=0;k<events.length;k++){ ev=events[k]; if(ev && String(ev.name||'')===en.nm && String(ev.date||'')===en.dt) return ev; }
+  }
+  return null;
+}
+// A payload that can never be stored (Firestore's per-document size limit, or a
+// permission rule) must not be retried for ever -- that is another way the
+// message looks permanently stuck.
+function _evPermanent(code){
+  var c=String(code||'').toLowerCase();
+  return c.indexOf('too-large')>=0||c.indexOf('invalid-argument')>=0||c.indexOf('permission-denied')>=0;
+}
+// One write attempt for one event. The shared path for a manual "Save to DB" and
+// an automatic retry, so both send exactly the same payload.
+function _pushEventDoc(ev, id){
+  var db=_dbObj(); if(!db) return Promise.reject(new Error('not connected'));
   var stamp=new Date().toISOString();
   var oldId=(ev._dbId && ev._dbId!==id) ? ev._dbId : null;
-  var payload={
-    event_id:id,
-    name:String(ev.name||''),
-    date:String(ev.date||''),
-    player_count:(ev.players?ev.players.length:0),
-    data:JSON.stringify(ev,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; }),
-    saved_at:stamp
-  };
-  var p=Promise.resolve();
-  if(oldId) p=Promise.resolve(db.eventRemove(oldId)).catch(function(){});
-  return p.then(function(){ return Promise.resolve(db.eventUpsert(id,payload)); }).then(function(){
+  var json='';
+  try{ json=JSON.stringify(ev,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; }); }catch(e){ json='{}'; }
+  if(json.length>1000000){
+    var big=new Error('too-large'); big.code='too-large';
+    return Promise.reject(big);
+  }
+  var payload={ event_id:id, name:String(ev.name||''), date:String(ev.date||''),
+    player_count:(ev.players?ev.players.length:0), data:json, saved_at:stamp };
+  _evUploading=true;
+  var work=Promise.resolve()
+    .then(function(){ if(!oldId) return null; return _evRace(db.eventRemove(oldId), EV_WRITE_TIMEOUT, 'remove'); })
+    .then(function(){ return _evRace(db.eventUpsert(id,payload), EV_WRITE_TIMEOUT, 'write'); });
+  return work.then(function(){
+    _evUploading=false;
     ev._dbId=id;
     _setPushedStamp(id,stamp);
     _eventPushedSig=_eventSig(ev);
     if(!ev._savedAt||String(ev._savedAt)<stamp) ev._savedAt=stamp;
+    _evLastErr='';
     _evOutboxClear(id); if(oldId) _evOutboxClear(oldId);
     return id;
-  });
+  }, function(err){ _evUploading=false; throw err; });
 }
-// Send every event that is still waiting. Stop at the first failure (the
-// device is clearly still offline) and try again on the next trigger.
+// Send every event that is still waiting, one at a time, with a deadline on each
+// step and a self-healing guard so one dead write can never freeze the queue.
 function flushEventOutbox(){
-  if(_evFlushing) return;
-  var ids=Object.keys(_evOutbox);
-  if(!ids.length) return;
-  if(!_dbUsable()){ _scheduleEvFlush(30000); return; }
-  _evFlushing=true;
-  var i=0;
-  function step(){
-    if(i>=ids.length){ _evFlushing=false; if(_evOutboxCount()) _scheduleEvFlush(15000); return; }
-    var id=ids[i++];
-    var ev=null;
-    for(var k=0;k<events.length;k++){
-      if((events[k]._dbId&&events[k]._dbId===id)||(!events[k]._dbId&&eventDocId(events[k])===id)){ ev=events[k]; break; }
-    }
-    if(!ev){ _evOutboxClear(id); return step(); }
-    if(!String(ev.date||'').trim()||!String(ev.name||'').trim()){ return step(); } // still incomplete, keep waiting
-    _pushEventDoc(ev, ev._dbId||id, {}).then(function(){
-      try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
-      renderSavedEvents(hasActiveEvent()?activeIdx:undefined);
-      try{ saveToStatus(true); }catch(e){}
-      try{ _evMarkOnlineNotice(id); }catch(e){}
-      step();
-    }).catch(function(){
-      _evFlushing=false;
-      _scheduleEvFlush(20000);
-    });
+  if(_evFlushing){
+    // The previous attempt never came back: take the queue over instead of
+    // staying wedged for the rest of the session.
+    if(Date.now()-_evFlushStart<65000) return;
+    _evFlushing=false;
   }
-  step();
+  var ids=Object.keys(_evOutbox);
+  if(!ids.length){ return; }
+  if(typeof navigator!=='undefined' && navigator.onLine===false){ try{ _evOutboxNote(); }catch(e){} _scheduleEvFlush(20000); return; }
+  if(!_dbObj()){ try{ _evOutboxNote(); }catch(e){} _scheduleEvFlush(15000); return; }
+  _evFlushing=true; _evFlushStart=Date.now();
+  var finished=function(){
+    _evFlushing=false;
+    try{ _evOutboxNote(); }catch(e){}
+    if(_evOutboxCount()) _scheduleEvFlush(20000);
+  };
+  _dbProbe().then(function(){
+    var i=0;
+    var next=function(){
+      if(i>=ids.length) return finished();
+      var id=ids[i++];
+      var en=_evNorm(_evOutbox[id]);
+      var ev=_evFind(id);
+      if(!ev){ _evOutboxClear(id); return next(); }
+      if(!String(ev.date||'').trim()||!String(ev.name||'').trim()) return next(); // still incomplete, keep waiting
+      if(en.n>=8 && _evPermanent(en.e)) return next();                             // known impossible, stop hammering
+      _pushEventDoc(ev, ev._dbId||id).then(function(){
+        try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
+        try{ renderSavedEvents(hasActiveEvent()?activeIdx:undefined); }catch(e){}
+        try{ saveToStatus(true); }catch(e){}
+        try{ _evMarkOnlineNotice(id); }catch(e){}
+        next();
+      }, function(err){
+        var why=_evOutboxFail(id, err);
+        // A refusal (too large / not allowed) is not a connection problem: report
+        // it and move on to the next event instead of blocking the whole queue.
+        if(_evPermanent(why)) return next();
+        finished();
+      });
+    };
+    next();
+  }, function(err){
+    // The database is not answering at all: keep everything queued and say so.
+    _evLastErr=(err&&(err.code||err.message))||'unreachable';
+    _evFlushing=false;
+    try{ _evOutboxNote(); }catch(e){}
+    _scheduleEvFlush(25000);
+  });
 }
 // One short confirmation the first time an offline event actually lands, so the
 // user can see it left this device (instead of guessing).
@@ -442,23 +541,48 @@ function _evOutboxNote(){
       el.style.cssText='font-size:11px;font-weight:600;color:#f59e0b;margin-top:4px';
       host.parentElement.appendChild(el);
     }
-    var n=_evOutboxCount();
-    el.style.display=n?'':'none';
+    var ids=Object.keys(_evOutbox), live=0, reason='';
+    ids.forEach(function(id){
+      var en=_evNorm(_evOutbox[id]);
+      var ev=_evFind(id);
+      if(!ev) return;
+      live++;
+      if(!reason && en.e) reason=en.e;
+    });
+    if(!reason && _evLastErr) reason=_evLastErr;
+    el.style.display=live?'':'none';
     el.innerHTML='';
-    if(!n){ return; }
+    if(!live){ return; }
     var txt=document.createElement('span');
-    txt.textContent=n+' event'+(n!==1?'s':'')+' saved on this device - will upload when the DB is back ';
+    txt.textContent=live+' event'+(live!==1?'s':'')+' saved on this device - will upload when the DB is back';
+    if(reason){ txt.textContent+=' ('+reason+')'; }
+    txt.title='The event is stored on this device and is sent again automatically. Press Upload now to try immediately.';
     el.appendChild(txt);
     var btn=document.createElement('button');
-    btn.type='button'; btn.textContent='Upload now';
-    btn.style.cssText='background:transparent;border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:700;cursor:pointer';
-    btn.addEventListener('click',function(){
-      if(!_dbUsable()){ showToast('Still not connected - the event stays on this device'); _scheduleEvFlush(5000); return; }
-      flushEventOutbox(); showToast('Uploading event...');
-    });
+    btn.type='button'; btn.textContent=_evUploading?'Uploading...':'Upload now';
+    btn.disabled=!!_evUploading;
+    btn.style.cssText='background:transparent;border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:700;cursor:pointer;margin-left:2px';
+    btn.addEventListener('click',function(){ uploadEventNow(); });
     el.appendChild(btn);
     try{ renderSavedEvents(hasActiveEvent()?activeIdx:undefined); }catch(e){}
   }catch(e){}
+}
+// "Upload now": a real attempt with a real answer. It probes the database first,
+// so a device with no usable connection says so instead of appearing to do nothing.
+function uploadEventNow(){
+  if(!_evOutboxCount() && hasActiveEvent()) _queueEventUpload(events[activeIdx]);
+  if(!_dbObj()){ showToast('Database not connected yet - kept on this device'); _scheduleEvFlush(8000); return; }
+  if(typeof navigator!=='undefined' && navigator.onLine===false){ showToast('This device is offline - kept on this device'); return; }
+  showToast('Uploading event...');
+  _dbProbe().then(function(){
+    flushEventOutbox();
+  }, function(err){
+    var why=(err&&(err.code||err.message))||'unreachable';
+    _evLastErr=String(why);
+    try{ _evOutboxNote(); }catch(e){}
+    showToast('Cannot reach the DB ('+why+') - event stays on this device');
+    _scheduleEvFlush(20000);
+  });
 }
 function _evMarkOnlineNotice(id){
   try{
@@ -480,6 +604,9 @@ if(typeof window!=='undefined'){
   window.__flushEvOutbox=flushEventOutbox;
   window.addEventListener('load',function(){ try{ _evOutboxNote(); }catch(e){} });
   window.__evOutboxCount=_evOutboxCount;
+  // Last-resort heartbeat: if every other trigger was missed (a tablet that slept
+  // through its reconnect), still try once a minute while something is waiting.
+  try{ setInterval(function(){ if(_evOutboxCount() && !_evFlushing) flushEventOutbox(); },60000); }catch(e){}
   window.__queueEventUpload=_queueEventUpload;
 }
 // A stable identifier for an event so the last selection survives a refresh
@@ -2458,21 +2585,26 @@ function saveEventToDB(){
   if(!String(ev.date||'').trim()){ showToast('Set the event date first'); return; }
   if(!String(ev.name||'').trim()){ showToast('Name the event first'); return; }
   var id=ev._dbId||eventDocId(ev);
-  // Not connected is no longer a dead end: the event stays queued on this device
-  // and the SAME write is re-sent by itself as soon as the database answers
-  // again (first live snapshot / back online).
-  if(!_dbUsable()){
-    _evOutboxQueue(id);
-    showToast('Not connected \u2014 event kept on this device, will upload when the DB is back');
+  // Not connected is never a dead end: the event stays queued on this device
+  // and the same write is re-sent as soon as the database answers again.
+  if(!_dbObj()){
+    _evOutboxQueue(id, ev);
+    showToast('Database not connected yet - event kept on this device');
     return;
   }
-  // Same doc id (MMDDYYYY_First_Last) + merge:true, so retrying a save that had
-  // actually landed can never create a second copy.
-  _pushEventDoc(ev,id,{}).then(function(){
+  showToast("Saving to DB...");
+  // Probe first so a dead connection is reported in seconds instead of the
+  // button appearing to do nothing while a write hangs.
+  _dbProbe().then(function(){
+    return _pushEventDoc(ev,id);
+  }).then(function(){
     saveToStatus(true); showToast('Saved to DB \u2022 '+id);
-  }).catch(function(e){
-    _evOutboxQueue(id);
-    showToast('Not connected \u2014 event kept on this device, will upload when the DB is back');
+  }, function(e){
+    var why=(e&&(e.code||e.message))||'error';
+    _evOutboxQueue(id, ev);
+    _evOutboxFail(id, e);
+    if(_evPermanent(why)){ showToast('DB refused this event ('+why+') - it stays on this device'); return; }
+    showToast('Cannot reach the DB ('+why+') - event kept on this device');
   });
 }
 var _sedb=document.getElementById('saveEventDbBtn'); if(_sedb) _sedb.addEventListener('click',saveEventToDB);

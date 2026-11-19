@@ -236,7 +236,10 @@ else {
         players(){ return cache; },
         // Re-tries a write right now (used by the offline event outbox), so a
         // queued event goes up the moment the database answers again.
-        connect(){ return getDocs(col).then(function(){ return true; }); },
+        // Cheap reachability check (one document, not the whole roster) so a
+        // queued event can report "cannot reach the DB" in seconds instead of
+        // appearing to do nothing.
+        connect(){ return getDoc(doc(db, COLLECTION, '__probe__')).then(function(){ return true; }); },
         onChange(fn){ listeners.push(fn); },
         upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
         remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
