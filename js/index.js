@@ -3924,13 +3924,13 @@ function _mergeRosterInto(primary, sources, f, opts){
 // set into one row, using the same rules as Merge Players (fields back-filled,
 // device/tech rows re-linked, extra rows removed). The roster is what the CSV
 // exports, so a duplicate row would export a player twice.
+// The match is on the NAME ONLY (case, extra spaces and punctuation ignored) --
+// so a row with no Cubs ID, or with a different ID, still counts as the same
+// player as the copy already in the database/roster with that name.
 function _dedupIdentity(p){
   if(!p) return '';
-  var cid=(PIDCUBS_IDX!==undefined?String(p[PIDCUBS_IDX]==null?'':p[PIDCUBS_IDX]):'').trim().toLowerCase();
-  if(cid) return 'id:'+cid;
   var nm=_fold(playerName(p));
-  if(nm) return 'nm:'+nm;
-  return '';
+  return nm ? ('nm:'+nm) : '';
 }
 // Groups of roster indexes that are the same player, duplicates only.
 function _dedupGroups(rows){
@@ -3964,7 +3964,7 @@ function dedupPlayers(){
   groups.forEach(function(g){ dupCount+=g.length-1; });
   var root=elItem('div');
   root.appendChild(elItem('h3',{textContent:'Dedup players'},'margin:0 0 4px;font-size:18px'));
-  root.appendChild(elItem('p',{textContent:dupCount+' duplicate row'+(dupCount!==1?'s':'')+' in '+groups.length+' player'+(groups.length!==1?'s':'')+'. Each set is combined into the copy that carries the most data (blank cells filled in, device entries re-linked) and the extra rows are removed. Database profiles are not deleted.'},'margin:0 0 12px;color:var(--muted);font-size:13px'));
+  root.appendChild(elItem('p',{textContent:dupCount+' duplicate row'+(dupCount!==1?'s':'')+' in '+groups.length+' player'+(groups.length!==1?'s':'')+'. Players are matched by name, so the one already in the database and a second entry with the same name count as the same player. Each set is combined into the copy that carries the most data (blank cells filled in, device entries re-linked) and the extra rows are removed. Database profiles are not deleted.'},'margin:0 0 12px;color:var(--muted);font-size:13px'));
   var box=elItem('div',{},'margin:0 0 14px;max-height:240px;overflow:auto;padding:10px 12px;background:#0b1220;border:1px solid var(--line);border-radius:8px');
   groups.forEach(function(g){
     var best=g.slice().sort(function(a,b){ return _dedupRichness(players[b])-_dedupRichness(players[a]); })[0];
