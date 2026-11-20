@@ -243,42 +243,84 @@ function scheduleEventDbSync(force){
   if(_eventDbTimer) return;
   if(_evPushPending && (Date.now()-_evPushStart)<4000){ _evPushDirty=true; return; }
   if(_evPushPending){ _evPushPending=false; }
-  _eventDbTimer=setTimeout(function(){
-    _eventDbTimer=null;
-    var cur=events[activeIdx];
-    if(!cur||!cur._dbId) return;
-    var id=cur._dbId;
-    try{
-      var stamp=new Date().toISOString();
-      // Remember the exact moment we push, so an older echo is ignored while this
-      // write is in flight (and just after it lands).
-      _lastLivePushAt=Date.now(); _evPushPending=true; _evPushStart=Date.now();
-      Promise.resolve(db.eventUpsert(id,{
-        event_id:id,
-        name:String(cur.name||''),
-        date:String(cur.date||''),
-        player_count:(cur.players?cur.players.length:0),
-        data:JSON.stringify(cur,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; }),
-        saved_at:stamp
-      })).then(function(){
-        _lastLivePushAt=Date.now(); _lastLivePush=stamp; _evPushPending=false;
-        _eventPushedSig=_eventSig(cur);
-        _setPushedStamp(id, stamp);
-        // Remember exactly what we wrote so an identical echo is a no-op.
-        if(!cur._savedAt||String(cur._savedAt)<stamp) cur._savedAt=stamp;
-        // Edits made while this write was in flight still need to reach the DB.
-        if(_evPushDirty){ _evPushDirty=false; if(hasActiveEvent() && _eventSig(events[activeIdx])!==_eventPushedSig) scheduleEventDbSync(); }
-      }).catch(function(){
-        _evPushPending=false;
-        // A failed live write must not lose the edit: hand the event to the retry
-        // queue, which re-sends the same document until it lands.
-        try{ _queueEventUpload(cur); }catch(e){}
-      });
-    }catch(e){}
-  }, 700);
+  _eventDbTimer=setTimeout(function(){ _eventDbTimer=null; _evLiveWrite(); }, 700);
   return;
 }
+// One paced live write of the event on screen. Called on a trailing edge, so a
+// burst of taps becomes one write carrying the final values.
+function _evLiveWrite(){
+  var cur=events[activeIdx];
+  if(!cur||!cur._dbId) return;
+  var db=_dbObj(); if(!db) return;
+  // Pacing: never write the same document faster than _evWriteGap. Firestore
+  // rate-limits sustained writes to one document and answers HTTP 429 when a
+  // device outruns that, so the next write is simply moved to the gap.
+  var since=_lastLivePushAt ? (Date.now()-_lastLivePushAt) : 1e9;
+  if(since<_evWriteGap){
+    if(_eventDbTimer) return;
+    _eventDbTimer=setTimeout(function(){ _eventDbTimer=null; _evLiveWrite(); }, (_evWriteGap-since)+40);
+    return;
+  }
+  // Never stack writes. If one is still unanswered, hold the edit and send it as
+  // soon as that write settles -- two identical writes in flight is exactly how a
+  // device ends up throttled.
+  if(_evInFlight){
+    _evPushDirty=true;
+    if(!_eventDbTimer) _eventDbTimer=setTimeout(function(){ _eventDbTimer=null; _evLiveWrite(); }, _evWriteGap+40);
+    return;
+  }
+  var id=cur._dbId;
+  try{
+    var stamp=new Date().toISOString();
+    // What is being sent, captured NOW. The event object keeps changing while the
+    // write is in flight, so comparing against it later would mark edits as
+    // "already saved" and quietly drop them.
+    var sentSig=_eventSig(cur);
+    var sentJson=JSON.stringify(cur,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; });
+    _evInFlight=true;
+    // Remember the exact moment we push, so an older echo is ignored while this
+    // write is in flight (and just after it lands).
+    _lastLivePushAt=Date.now(); _evPushPending=true; _evPushStart=Date.now();
+    Promise.resolve(db.eventUpsert(id,{
+      event_id:id,
+      name:String(cur.name||''),
+      date:String(cur.date||''),
+      player_count:(cur.players?cur.players.length:0),
+      data:sentJson,
+      saved_at:stamp
+    })).then(function(){
+      _evInFlight=false;
+      _lastLivePushAt=Date.now(); _lastLivePush=stamp; _evPushPending=false;
+      _eventPushedSig=sentSig;
+      try{ _evPushedSigs[id]=sentSig; }catch(e){}
+      _setPushedStamp(id, stamp);
+      // Remember exactly what we wrote so an identical echo is a no-op.
+      if(!cur._savedAt||String(cur._savedAt)<stamp) cur._savedAt=stamp;
+      // Writes are getting through at this pace: creep back to the normal gap.
+      if(++_evWriteOk>=3 && _evWriteGap>EV_MIN_WRITE_GAP){ _evWriteGap=Math.max(EV_MIN_WRITE_GAP, Math.round(_evWriteGap/2)); _evWriteOk=0; }
+      // Edits made while this write was in flight still need to reach the DB.
+      if(_evPushDirty){ _evPushDirty=false; if(hasActiveEvent() && _eventSig(events[activeIdx])!==_eventPushedSig) scheduleEventDbSync(); }
+      else if(hasActiveEvent() && _eventSig(events[activeIdx])!==_eventPushedSig) scheduleEventDbSync();
+    }).catch(function(err){
+      _evInFlight=false;
+      _evPushPending=false;
+      var c=String((err&&(err.code||err.message))||'');
+      if(c.indexOf('429')>=0 || c.indexOf('resource-exhausted')>=0 || c.indexOf('quota')>=0){
+        // Being throttled (or out of quota): slow down instead of hammering.
+        _evWriteGap=Math.min(Math.max(Math.round(_evWriteGap*2),2400),20000); _evWriteOk=0;
+      }
+      // A failed live write must not lose the edit: hand the event to the retry
+      // loop, which re-sends the same document until it lands.
+      try{ _queueEventUpload(cur); }catch(e){}
+    });
+  }catch(e){}
+}
 var _lastLivePush=0, _lastLivePushAt=0;
+// Firestore accepts roughly one write per second to a SINGLE document. Charting
+// taps arrive faster than that, so the live push is paced: at most one write per
+// _evWriteGap ms per document, and the gap widens if the database answers 429.
+var EV_MIN_WRITE_GAP=1200, _evWriteGap=1200, _evWriteOk=0;
+var _evInFlight=false;            // one write at a time: a hung write must not stack
 // Timestamp used to decide whether an incoming DB copy is OLDER than what this
 // device already has. Every live push records its exact saved_at here, and an
 // edit made on this device also stamps the local event, so the inbound listener
@@ -358,6 +400,9 @@ function _evRace(p, ms, what){
 // Older builds kept a browser-side list of "events waiting to upload". It is gone;
 // any leftover copy is removed so an old count can never reappear.
 try{ localStorage.removeItem('measurables_ev_outbox_v1'); }catch(e){}
+// What the database already holds for each document, so an unchanged event is
+// never written again (a stale echo must not turn into a new write).
+var _evPushedSigs={};
 function _evOwedCount(){ return Object.keys(_evWrites).length; }
 function _evOwedAdd(id, ev){
   if(!id) return;
@@ -442,6 +487,9 @@ function _queueEventUpload(ev){
   if(!String(ev.date||'').trim() && !String(ev.name||'').trim()) return;
   var id=_evResolveDocId(ev);
   if(!id) return;
+  // The database already holds exactly this content -> sending it again is a
+  // wasted write. (This is what a stale snapshot echo used to cause.)
+  try{ if(_evPushedSigs[id] && _evPushedSigs[id]===_eventSig(ev)) return; }catch(e){}
   _evOwedAdd(id, ev);
   _scheduleEvFlush(500);
 }
@@ -467,6 +515,16 @@ function _evFind(id){
   if(rec && rec.ev) return rec.ev;
   return null;
 }
+// Plain words for the one failure line. "HTTP 429" is a rate limit, not a broken
+// event: the database is telling this device to slow down.
+function _evWhyText(why){
+  var c=String(why||'').toLowerCase();
+  if(c.indexOf('429')>=0||c.indexOf('quota')>=0||c.indexOf('resource-exhausted')>=0) return 'the database is busy (429)';
+  if(c.indexOf('timeout')>=0) return 'no answer from the database';
+  if(c.indexOf('unavailable')>=0||c.indexOf('not connected')>=0) return 'the database is unreachable';
+  if(c.indexOf('permission-denied')>=0) return 'the database refused it';
+  return String(why||'error');
+}
 // A payload that can never be stored (size limit, or a permission rule) is not
 // retried for ever.
 function _evPermanent(code){
@@ -490,15 +548,26 @@ function _pushEventDoc(ev, id){
     var big=new Error('too-large'); big.code='write: too-large';
     return Promise.reject(big);
   }
+  var sentSig=_eventSig(ev);
   var payload={ event_id:target, name:String(ev.name||''), date:String(ev.date||''),
     player_count:(ev.players?ev.players.length:0), data:json, saved_at:stamp };
   _evUploading=true;
-  // The live SDK write, and (only if it has not answered after EV_REST_AFTER ms)
-  // the identical write over plain HTTPS. Whichever confirms first wins.
-  var sdkP=_evRace(db.eventUpsert(target,payload), EV_WRITE_TIMEOUT, 'write');
+  // The live SDK write, and (ONLY if it has not confirmed after EV_REST_AFTER ms)
+  // the identical write over plain HTTPS. Whichever confirms first wins -- and the
+  // loser is cancelled, because a second write of the same document is not free:
+  // Firestore rate-limits sustained writes to one document and answers HTTP 429.
+  var sdkOk=false, sdkRefused=false;
+  var sdkP=_evRace(db.eventUpsert(target,payload), EV_WRITE_TIMEOUT, 'write').then(function(v){
+    sdkOk=true; return v;
+  }, function(e){
+    var c=String((e&&(e.code||e.message))||'');
+    if(c.indexOf('permission-denied')>=0 || c.indexOf('invalid-argument')>=0 || c.indexOf('too-large')>=0) sdkRefused=true;
+    throw e;
+  });
   var restP=new Promise(function(resolve,reject){
     setTimeout(function(){
-      if(_evRestDone) return resolve('rest-skip');
+      if(sdkOk) return resolve('sdk');          // already stored -- never write twice
+      if(sdkRefused) return resolve('skip');    // refused for good -- same rules apply
       _evRestWrite(target,payload).then(function(){ _evRestDone=true; resolve('rest'); }, reject);
     }, EV_REST_AFTER);
   });
@@ -509,9 +578,10 @@ function _pushEventDoc(ev, id){
     _evUploading=false;
     ev._dbId=target;
     _setPushedStamp(target,stamp);
-    _eventPushedSig=_eventSig(ev);
+    _eventPushedSig=sentSig;
     if(!ev._savedAt||String(ev._savedAt)<stamp) ev._savedAt=stamp;
     _evLastErr=''; _evFlushGap=2000;
+    _evPushedSigs[target]=sentSig;
     _evOwedClear(target); if(oldId) _evOwedClear(oldId);
     // Only after a successful write: retire a superseded document (legacy path).
     if(oldId && oldId!==target){
@@ -547,21 +617,25 @@ function flushEventOutbox(){
       _evOwedClear(id);
       try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
       try{ renderSavedEvents(hasActiveEvent()?activeIdx:undefined); }catch(e){}
-      try{ saveToStatus(true); }catch(e){}
+      try{ _statusSyncSoon(); }catch(e){}
       next();
     }, function(err){
       var why=(err&&(err.code||err.message))||'error';
       _evLastErr=String(why);
       rec.tries=(rec.tries||0)+1; rec.err=_evLastErr;
       if(_evPermanent(why)){ _evOwedClear(id); showToast('DB refused this event ('+why+')'); return next(); }
-      if(rec.tries===1) showToast('Not saved to the DB yet ('+why+') - retrying');
+      if(rec.tries===1) showToast('Not saved to the DB yet ('+_evWhyText(why)+') - retrying');
       next();
     });
   };
   var finish=function(){
     _evFlushing=false;
     if(_evOwedCount()){
-      _evFlushGap=Math.min(Math.round(_evFlushGap*1.6),20000);
+      var slow=String(_evLastErr||'').toLowerCase();
+      var throttled=(slow.indexOf('429')>=0||slow.indexOf('quota')>=0||slow.indexOf('resource-exhausted')>=0);
+      // Being throttled needs a longer pause than a plain failure, or the retry
+      // itself keeps the device over the limit.
+      _evFlushGap=Math.min(Math.round(_evFlushGap*(throttled?2.5:1.6)), throttled?60000:20000);
       _scheduleEvFlush(_evFlushGap);
     }
   };
@@ -1677,11 +1751,7 @@ function _statusAfterValueChange(){
   try{
     if(typeof hasActiveEvent!=='function'||!hasActiveEvent()) return;
     if(typeof eventDate!=='string'||!eventDate.trim()) return;
-    if(_statusTouch) clearTimeout(_statusTouch);
-    _statusTouch=setTimeout(function(){
-      _statusTouch=null;
-      try{ saveToStatus(true); }catch(e){}
-    }, 700);
+    _statusSyncSoon(4000);
   }catch(e){}
 }
 
@@ -2741,6 +2811,7 @@ document.getElementById('deAddPlayer').addEventListener('click',promptAddDeviceP
   },{host:host});
 })();
 (function(){var _dm=document.getElementById('deMergePlayers'); if(_dm) _dm.addEventListener('click',openMergePlayersPopup);})();
+(function(){var _dd=document.getElementById('deDedupPlayers'); if(_dd) _dd.addEventListener('click',dedupPlayers);})();
 
 // ---- Data Entry (device metadata) ----
 const DEVICES=[
@@ -3116,6 +3187,20 @@ function _statusRevertMap(p,dt,excludeNames){
 }
 // Stamps each player's "last date taken" per data group in the DB profile.
 // Called on its own or piggy-backed by "Save to DB" (silent=true suppresses its toast).
+// Compact, order-independent view of a status object, for "did anything change?".
+function _statusCompact(st){
+  var o={}, k;
+  for(k in (st||{})){ if(Object.prototype.hasOwnProperty.call(st,k)){ var v=st[k]; if(v!=null && String(v)!=='') o[k]=String(v); } }
+  return Object.keys(o).sort().map(function(x){ return x+'='+o[x]; }).join('|');
+}
+// The Status page does not need to follow every single edit. One shared, slow
+// sync: it is cheap now (only changed dates are written), but there is no reason
+// to run it while somebody is still tapping values in.
+var _statusSyncTimer=null;
+function _statusSyncSoon(ms){
+  if(_statusSyncTimer) return;
+  _statusSyncTimer=setTimeout(function(){ _statusSyncTimer=null; try{ saveToStatus(true); }catch(e){} }, ms||8000);
+}
 function saveToStatus(silent){
   if(!hasActiveEvent()){ if(!silent) showToast('Create or load an event first'); return; }
   var dt=(eventDate||'').trim();
@@ -3159,6 +3244,11 @@ function saveToStatus(silent){
       }
     });
     if(clearArm) delete status['Arm Strength'];          // no real arm values (or pitcher): never a date
+    // THE big write/read saver. This function used to push every player's profile
+    // document plus a history entry per data group on every call -- and it is
+    // called after every event save, so one charting session could burn thousands
+    // of writes. Nothing is sent now unless the stored dates actually differ.
+    if(_statusCompact(existing)===_statusCompact(status)) return;
     // Newer event captured later than the current value -> this event is the
     // latest date for the group, which is exactly the "delete moves it forward"
     // case; older events never move a date backwards.
@@ -3168,12 +3258,16 @@ function saveToStatus(silent){
       // previous date taken when a group checkbox is turned off.
       if(db&&db.pushStatusHist){
         taken.forEach(function(g){
+          // Only when this event's date is NEW for the group. Re-confirming a date
+          // that is already stored is a read + write that changes nothing.
+          if(_sameDate(String(existing[g.name]||''),dt)) return;
           try{ Promise.resolve(db.pushStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
         });
         // Drop this event's date from the history of every group that was
         // cleared here, so a later uncheck can never step back onto a date
         // that no longer holds any data.
         _gone.forEach(function(g){
+          if(!_sameDate(String(existing[g.name]||''),dt)) return;
           if(typeof db.removeStatusHist==='function'){
             try{ Promise.resolve(db.removeStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
           }
@@ -3183,11 +3277,19 @@ function saveToStatus(silent){
         // step back onto a date that holds nothing.
         STATUS_GROUPS.forEach(function(g){
           if(taken.indexOf(g)>=0) return;
+          // Nothing stored for this date -> nothing to remove (and no read).
+          if(!_sameDate(String(existing[g.name]||''),dt)) return;
           if(typeof db.removeStatusHist==='function'){
             try{ Promise.resolve(db.removeStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
           }
         });
       }
+      // Keep the local copy in step: without this the next call would compare
+      // against a stale doc and write the same values again.
+      try{
+        var hit=cache.find(function(d){ return String(d._id)===String(id); });
+        if(hit){ hit.status=status; } else { cache.push({ _id:String(id), status:status }); }
+      }catch(e){}
       n++;
     }catch(e){}
   });
@@ -3213,7 +3315,7 @@ function _statusAfterDevChange(){
   try{
     if(typeof hasActiveEvent!=='function'||!hasActiveEvent()) return;
     if(typeof eventDate!=='string'||!eventDate.trim()) return;
-    saveToStatus(true);
+    _statusSyncSoon(1500);
   }catch(e){}
 }
 function setDeviceLink(p,devKey,on){
@@ -3380,7 +3482,7 @@ function renderDevLinks(){
   const p=players[current];
   if(!p._dev) p._dev=blankDev();
   const actions=document.createElement('div');actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px';
-  [['Yards',openYardsPopup],['Defense',openDefensePopup],['Measurables',openMeasurablesPopup],['Tech',openTechPopup],['Edit Players',openEditPlayersPopup],['Merge Players',openMergePlayersPopup]].forEach(a=>{
+  [['Yards',openYardsPopup],['Defense',openDefensePopup],['Measurables',openMeasurablesPopup],['Tech',openTechPopup],['Edit Players',openEditPlayersPopup],['Merge Players',openMergePlayersPopup],['Dedup Players',dedupPlayers]].forEach(a=>{
     const b=document.createElement('button');b.className='ghost';b.textContent=a[0];b.addEventListener('click',a[1]);actions.appendChild(b);
   });
   box.appendChild(actions);
@@ -3757,6 +3859,21 @@ function doPlayerMerge(selectedPlayers, f){
   if(!hasActiveEvent()){ closeModal(); return; }
   var primary=selectedPlayers[0];
   var sources=selectedPlayers.slice(1);
+  _mergeRosterInto(primary, sources, f, false);
+  closeModal();
+  renderSavedEvents(activeIdx); updateGate();
+  renderPlayers(); renderForm(); renderDevLinks(); if(mode==='data') renderDataEntry();
+  scheduleDBSync(primary);
+  showToast('Merged '+selectedPlayers.length+' players');
+}
+// The actual merge, shared by "Merge Players" and "Dedup Players": combine blank
+// cells, re-link device rows onto the kept player, apply the confirmed details,
+// and drop the source players from the roster (their DB profiles are left alone).
+// opts.onlyNonBlank keeps the kept player's own value when the incoming details
+// are blank -- what Dedup needs, since nobody is confirming fields by hand.
+function _mergeRosterInto(primary, sources, f, opts){
+  opts=opts||{};
+  if(!hasActiveEvent()||!primary) return 0;
   // 1) Back-fill blank cells / profile props / device flags on the primary from
   //    each source (the primary's own values always win).
   sources.forEach(function(sp){ _backfillPlayer(primary, sp); });
@@ -3764,6 +3881,7 @@ function doPlayerMerge(selectedPlayers, f){
   //    then drop duplicate non-blast rows (blast is rebuilt per hand below), so
   //    captured data lands on the one kept player instead of being lost.
   ensurePid(primary);
+  sources.forEach(function(sp){ ensurePid(sp); });
   var data=ensureData(events[activeIdx]);
   var srcPids={}; sources.forEach(function(sp){ if(sp._pid) srcPids[sp._pid]=1; });
   ['trackman','blast','forceplate','timinggates','dynamo'].forEach(function(dk){
@@ -3777,12 +3895,18 @@ function doPlayerMerge(selectedPlayers, f){
     }
   });
   // 3) Apply the confirmed profile fields to the primary.
-  if(NAME_IDX!==undefined) primary[NAME_IDX]=(f.name||'');
-  if(PIDCUBS_IDX!==undefined) primary[PIDCUBS_IDX]=(f.id||'');
-  if(f.pos==='P'){ if(PITCHER_IDX!==undefined) primary[PITCHER_IDX]=true; if(POS){ primary[POS.field]=''; applyPosition(primary); } }
-  else { if(PITCHER_IDX!==undefined) primary[PITCHER_IDX]=false; if(POS) primary[POS.field]=(f.pos||''); }
-  primary._class=f.cls||''; primary._dob=f.dob||''; primary._agent=f.agent||'';
-  primary._bats=f.bats||''; primary._throws=f.throws||'';
+  var keepBlank=function(v){ return opts.onlyNonBlank ? String(v==null?'':v).trim()!=='' : true; };
+  if(NAME_IDX!==undefined && keepBlank(f.name)) primary[NAME_IDX]=(f.name||'');
+  if(PIDCUBS_IDX!==undefined && keepBlank(f.id)) primary[PIDCUBS_IDX]=(f.id||'');
+  if(keepBlank(f.pos)){
+    if(f.pos==='P'){ if(PITCHER_IDX!==undefined) primary[PITCHER_IDX]=true; if(POS){ primary[POS.field]=''; applyPosition(primary); } }
+    else { if(PITCHER_IDX!==undefined) primary[PITCHER_IDX]=false; if(POS) primary[POS.field]=(f.pos||''); }
+  }
+  if(keepBlank(f.cls)) primary._class=f.cls||'';
+  if(keepBlank(f.dob)) primary._dob=f.dob||'';
+  if(keepBlank(f.agent)) primary._agent=f.agent||'';
+  if(keepBlank(f.bats)) primary._bats=f.bats||'';
+  if(keepBlank(f.throws)) primary._throws=f.throws||'';
   recalc(primary);
   // 4) Reconcile the primary's device checkboxes with the surviving rows, then
   //    restamp the linked rows with the merged identity (rebuilds Blast per hand).
@@ -3793,14 +3917,100 @@ function doPlayerMerge(selectedPlayers, f){
   for(var pi=players.length-1;pi>=0;pi--){ if(players[pi]!==primary && players[pi]._pid && srcPids[players[pi]._pid]) players.splice(pi,1); }
   var ki=players.indexOf(primary); current=ki>=0?ki:0;
   persistEvents();
+  return sources.length;
+}
+// ---- Dedup Players (roster) ----
+// Finds players that appear more than once in THIS event's roster and folds each
+// set into one row, using the same rules as Merge Players (fields back-filled,
+// device/tech rows re-linked, extra rows removed). The roster is what the CSV
+// exports, so a duplicate row would export a player twice.
+function _dedupIdentity(p){
+  if(!p) return '';
+  var cid=(PIDCUBS_IDX!==undefined?String(p[PIDCUBS_IDX]==null?'':p[PIDCUBS_IDX]):'').trim().toLowerCase();
+  if(cid) return 'id:'+cid;
+  var nm=_fold(playerName(p));
+  if(nm) return 'nm:'+nm;
+  return '';
+}
+// Groups of roster indexes that are the same player, duplicates only.
+function _dedupGroups(rows){
+  var map={}, order=[], out=[];
+  (rows||[]).forEach(function(p,i){
+    var k=_dedupIdentity(p);
+    if(!k) return;
+    if(!map[k]){ map[k]=[]; order.push(k); }
+    map[k].push(i);
+  });
+  order.forEach(function(k){ if(map[k].length>1) out.push(map[k]); });
+  return out;
+}
+// How much a row actually carries, so the copy with real data is the one kept.
+function _dedupRichness(p){
+  if(!p) return 0;
+  var n=0;
+  Object.keys(p).forEach(function(k){
+    if(k.charAt(0)==='_'){ return; }
+    if(!_isBlankCell(p[k])) n++;
+  });
+  if(p._dev) Object.keys(p._dev).forEach(function(k){ if(p._dev[k]) n++; });
+  return n;
+}
+function dedupPlayers(){
+  if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
+  if(players.length<2){ showToast('Need at least two players to dedup'); return; }
+  var groups=_dedupGroups(players);
+  if(!groups.length){ showToast('No duplicate players found'); return; }
+  var dupCount=0;
+  groups.forEach(function(g){ dupCount+=g.length-1; });
+  var root=elItem('div');
+  root.appendChild(elItem('h3',{textContent:'Dedup players'},'margin:0 0 4px;font-size:18px'));
+  root.appendChild(elItem('p',{textContent:dupCount+' duplicate row'+(dupCount!==1?'s':'')+' in '+groups.length+' player'+(groups.length!==1?'s':'')+'. Each set is combined into the copy that carries the most data (blank cells filled in, device entries re-linked) and the extra rows are removed. Database profiles are not deleted.'},'margin:0 0 12px;color:var(--muted);font-size:13px'));
+  var box=elItem('div',{},'margin:0 0 14px;max-height:240px;overflow:auto;padding:10px 12px;background:#0b1220;border:1px solid var(--line);border-radius:8px');
+  groups.forEach(function(g){
+    var best=g.slice().sort(function(a,b){ return _dedupRichness(players[b])-_dedupRichness(players[a]); })[0];
+    var lab=playerMergeLabel(players[best]);
+    box.appendChild(elItem('div',{textContent:(g.length+'\u00d7  ')+lab},'font-size:12px;color:var(--txt);padding:3px 0'));
+  });
+  root.appendChild(box);
+  var acts=elItem('div',{},'display:flex;gap:10px;justify-content:flex-end;margin-top:16px');
+  var cancel=elItem('button',{className:'ghost',textContent:'Cancel'}); cancel.addEventListener('click',closeModal);
+  var go=elItem('button',{className:'primary',textContent:'Dedup '+dupCount});
+  go.addEventListener('click',function(){ go.disabled=true; applyDedupGroups(groups); });
+  acts.appendChild(cancel); acts.appendChild(go); root.appendChild(acts);
+  openModalNode(root);
+}
+function applyDedupGroups(groups){
+  var removed=0, kept=0, keepers=[];
+  // Snapshot the row objects up front: removing one set shifts the indexes of the
+  // sets after it, so index lookups must not happen while splicing.
+  var sets=[];
+  groups.forEach(function(g){
+    var objs=g.map(function(i){ return players[i]; }).filter(function(p){ return p; });
+    if(objs.length>1) sets.push(objs);
+  });
+  sets.forEach(function(g){
+    // Keep the row with the most real data (first one wins a tie).
+    var order=g.slice().sort(function(a,b){ return _dedupRichness(b)-_dedupRichness(a); });
+    var primary=order[0];
+    if(!primary) return;
+    var sources=[];
+    for(var i=1;i<order.length;i++){ var sp=order[i]; if(sp && sp!==primary && players.indexOf(sp)>=0) sources.push(sp); }
+    if(!sources.length) return;
+    var f={ name:(NAME_IDX!==undefined?primary[NAME_IDX]:'')||'',
+            id:(PIDCUBS_IDX!==undefined?primary[PIDCUBS_IDX]:'')||'',
+            pos:((PITCHER_IDX!==undefined&&primary[PITCHER_IDX]===true)?'P':((POS&&primary[POS.field])?String(primary[POS.field]):'')),
+            cls:primary._class||'', dob:primary._dob||'', agent:primary._agent||'',
+            bats:primary._bats||'', throws:primary._throws||'' };
+    removed+=_mergeRosterInto(primary, sources, f, { onlyNonBlank:true });
+    kept++; keepers.push(primary);
+  });
+  if(!kept){ closeModal(); return; }
   closeModal();
   renderSavedEvents(activeIdx); updateGate();
   renderPlayers(); renderForm(); renderDevLinks(); if(mode==='data') renderDataEntry();
-  // Push the merged profile to the DB (edits the primary's profile doc). Source
-  //    DB profiles are intentionally left in place (matches the app convention
-  //    that removing a player from the roster never deletes its DB profile).
-  scheduleDBSync(primary);
-  showToast('Merged '+selectedPlayers.length+' players');
+  keepers.forEach(function(p){ try{ scheduleDBSync(p); }catch(e){} });
+  try{ scheduleEventDbSync(true); }catch(e){}
+  showToast('Deduped '+removed+' duplicate player'+(removed!==1?'s':''));
 }
 function deField(label,val,onIn){
   const w=document.createElement('div');w.className='field';

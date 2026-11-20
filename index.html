@@ -106,6 +106,7 @@
         </div>
         <button id="deAddPlayer">+Create Player</button>
         <button class="ghost" id="deMergePlayers">Merge Players</button>
+        <button class="ghost" id="deDedupPlayers" title="Merge players that appear more than once in this event (same Cubs ID or same name)">Dedup Players</button>
       </div>
       <div class="seg-group"><div class="lbl">Device IDs (shared metadata)</div>
         <div class="mapids" id="mapIds"></div>
@@ -229,42 +230,93 @@ else {
       // Fallback read for the Events collection over plain HTTPS. The live channel
       // can go quiet on a network that stalls streaming connections (the page then
       // looks frozen on old content); this keeps the event content refreshing.
+      // Reads ONLY what changed. Asking for the whole collection every few seconds
+      // is 35+ document reads a poll -- thousands a day for nothing. With a
+      // "saved_at >= last seen" query an idle poll returns nothing (0 reads).
+      var _evRestSince = '';
       function _restEventList(){
         if(!FBC.projectId || !FBC.apiKey || typeof fetch !== 'function') return Promise.resolve(null);
-        var url='https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(FBC.projectId)+
-          '/databases/(default)/documents/'+encodeURIComponent(EVENTS_COLLECTION)+
-          '?pageSize=300&key='+encodeURIComponent(FBC.apiKey);
-        return fetch(url).then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); }).then(function(j){
-          return (j.documents||[]).map(function(d){
-            var f=d.fields||{};
-            function g(k){ var v=f[k]||{}; if(v.stringValue!==undefined) return v.stringValue;
-              if(v.integerValue!==undefined) return Number(v.integerValue); return ''; }
-            return { _id:String(d.name||'').split('/').pop(), event_id:g('event_id'), name:g('name'),
-                     date:g('date'), player_count:g('player_count'), data:g('data'), saved_at:g('saved_at') };
-          });
+        var base='https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(FBC.projectId)+
+          '/databases/(default)/documents';
+        var url, opt;
+        if(!_evRestSince){
+          // First call after a quiet connection: one full read, then change-only.
+          url=base+'/'+encodeURIComponent(EVENTS_COLLECTION)+'?pageSize=300&key='+encodeURIComponent(FBC.apiKey);
+          opt={ method:'GET' };
+        } else {
+          url=base+':runQuery?key='+encodeURIComponent(FBC.apiKey);
+          opt={ method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({
+            structuredQuery:{
+              from:[{ collectionId:EVENTS_COLLECTION }],
+              where:{ fieldFilter:{ field:{ fieldPath:'saved_at' }, op:'GREATER_THAN_OR_EQUAL',
+                                     value:{ stringValue:_evRestSince } } },
+              limit:200
+            }
+          })};
+        }
+        return fetch(url,opt).then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); }).then(function(j){
+          if(Array.isArray(j) && _evRestSince){        // runQuery answer
+            var rows=[];
+            j.forEach(function(one){ if(one && one.document) rows.push(one.document); });
+            return rows.map(_mapRestEvent);
+          }
+          return ((j&&j.documents)||[]).map(_mapRestEvent);
         });
+      }
+      function _mapRestEvent(d){
+        var f=d.fields||{};
+        function g(k){ var v=f[k]||{}; if(v.stringValue!==undefined) return v.stringValue;
+          if(v.integerValue!==undefined) return Number(v.integerValue); return ''; }
+        return { _id:String(d.name||'').split('/').pop(), event_id:g('event_id'), name:g('name'),
+                 date:g('date'), player_count:g('player_count'), data:g('data'), saved_at:g('saved_at') };
+      }
+      function _evRestNoteSince(list){
+        var max='';
+        (list||[]).forEach(function(d){ if(d && d.saved_at && String(d.saved_at)>max) max=String(d.saved_at); });
+        if(max) _evRestSince=max;
       }
       onSnapshot(evCol, snap => {
         _evLastSnap = Date.now();
         const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+        try{ _evRestNoteSince(evs); }catch(e){}
         try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
         connState('ok','Connected');
         if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
         if(window.__applyDbEvents){ try { window.__applyDbEvents(evs, snap); } catch(e){} }
       }, err => { console.warn("Firestore events listen error:", err); connState('bad','Disconnected — showing saved data'); });
       // If the live channel has not delivered anything for a while, read once over
-      // HTTPS so another device's changes still show up here.
-      setInterval(function(){
-        try{ if(document.hidden) return; }catch(e){}
-        if(Date.now()-_evLastSnap < 15000) return;
+      // HTTPS so another device's changes still show up here. This is a fallback,
+      // not a heartbeat: one read every 20s at most, backing off to 3 minutes when
+      // the read is refused (HTTP 429 means too many requests -- reading faster
+      // makes that worse, never better).
+      var _evPollGap = 20000, _evPollTimer = null;
+      function _evPollSchedule(ms){
+        if(_evPollTimer) clearTimeout(_evPollTimer);
+        _evPollTimer = setTimeout(_evPollOnce, ms);
+      }
+      function _evPollOnce(){
+        _evPollTimer = null;
+        try{ if(document.hidden){ _evPollSchedule(_evPollGap); return; } }catch(e){}
+        if(Date.now()-_evLastSnap < 15000){ _evPollSchedule(5000); return; }
         _restEventList().then(function(list){
-          if(!list) return;
+          if(!list){ _evPollSchedule(_evPollGap); return; }
           _evLastSnap = Date.now();
-          try { localStorage.setItem('cubs_last_events', JSON.stringify(list)); } catch(e){}
-          connState('ok','Connected (HTTP refresh)');
-          if(window.__applyDbEvents){ try { window.__applyDbEvents(list, null); } catch(e){} }
-        }).catch(function(){});
-      }, 7000);
+          _evPollGap = 20000;
+          if(list.length){
+            _evRestNoteSince(list);
+            connState('ok','Connected (HTTP refresh)');
+            if(window.__applyDbEvents){ try { window.__applyDbEvents(list, null); } catch(e){} }
+          }
+          _evPollSchedule(_evPollGap);
+        }).catch(function(err){
+          var m=String((err&&err.message)||'');
+          if(m.indexOf('429')>=0 || m.indexOf('quota')>=0 || m.indexOf('RESOURCE_EXHAUSTED')>=0){
+            _evPollGap = Math.min(Math.max(Math.round(_evPollGap*2), 40000), 180000);
+          }
+          _evPollSchedule(_evPollGap);
+        });
+      }
+      _evPollSchedule(_evPollGap);
       window.CubSentryDB = {
         ready:true,
         players(){ return cache; },
