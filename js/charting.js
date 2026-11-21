@@ -71,7 +71,7 @@ function startPlayerCacheListener(){
   try {
     _db.collection(COLLECTION).onSnapshot(
       snap => {
-        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id), bats:(data.bats||data.bat||''), throws:(data.throws||data.throw||''), position:(data.position||data.pos||''), cls:(data.class||data.year||data.grade||''), agent:(data.agent||data.agents||'') }; });
+        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id), bats:(data.bats||data.bat||''), throws:(data.throws||data.throw||''), position:(data.position||data.pos||''), cls:(data.class||data.year||data.grade||''), agent:(data.agent||data.agents||''), dob:(data.dob||data.birthdate||data.birth_date||'') }; });
         list.sort((a,b)=> a.name.localeCompare(b.name));
         _playerCache = list; _playerCache._listening = true;
         _playerCacheReady = true; _playerCacheError = false;
@@ -436,7 +436,8 @@ const DEF_ROLE = { outfielders:'OF', infielders:'IF', catchers:'C' };
    from local storage. */
 const CHARTING_COLLECTION = 'ChartingSessions';
 let _syncTimer = null;
-const _syncedCache = {};          // session id -> JSON of last successfully-queued write
+const _syncedCache = {};          // session id -> JSON of last successfully-written content
+const _syncedInFlight = {};       // session id -> JSON currently being written (not yet confirmed)
 const _localEditTs = {};          // session id -> last time THIS device changed it (push)
 const _cloudMeta = {};            // session id -> last _updatedAt seen from the cloud
 let _knownSessionIds = new Set(); // session ids this page has written, for deletion sync
@@ -451,12 +452,16 @@ function syncSessionsToDb(){
       ids.add(sess.id);
       const json = JSON.stringify(sess);
       if (_syncedCache[sess.id] === json) return;   // unchanged since last write
-      _syncedCache[sess.id] = json;
+      if (_syncedInFlight[sess.id] === json) return; // same content already on its way
       _localEditTs[sess.id] = Date.now();            // genuine local change on this device
       const payload = _cloudSafe(Object.assign({}, sess, { _updatedAt: Date.now() }));
       if (!payload) return;
+      // Remember it as written only AFTER the write lands: marking it up front
+      // meant a failed write was never retried (the payload looked current).
+      _syncedInFlight[sess.id] = json;
       _db.collection(CHARTING_COLLECTION).doc(String(sess.id)).set(payload)
-        .catch(err => console.warn('ChartingSessions write failed', sess.id, err));
+        .then(() => { _syncedCache[sess.id] = json; if (_syncedInFlight[sess.id] === json) delete _syncedInFlight[sess.id]; })
+        .catch(err => { if (_syncedInFlight[sess.id] === json) delete _syncedInFlight[sess.id]; console.warn('ChartingSessions write failed', sess.id, err); });
     });
     // delete cloud docs for sessions this page removed
     _knownSessionIds.forEach(id => {
@@ -508,6 +513,7 @@ function startChartingSessionsListener(){
         const incoming = _stripSessMeta(data);
         const incomingJson = JSON.stringify(incoming);
         if (_syncedCache[id] === incomingJson) return;            // our own echo
+        if (_syncedInFlight[id] === incomingJson) return;         // echo of a write still in flight
         const i = state.sessions.findIndex(function(s){ return String(s.id)===String(id); });
         if (i < 0){
           if (_deletedIds.has(String(id))) return;                // deleted here; ignore stale inbound copy
@@ -916,11 +922,31 @@ async function editPlayersModal(){
       isPitcher: pitchers.includes(name),
       position:'', cls:'', dob:'', bats:'', throws:'', agent:'', loaded:false };
   });
-  // Pull each player's stored profile (parallel) so every card shows its
-  // current values in both Legacy and Dropdown views.
-  if(_db){
-    await Promise.all(model.map(async m=>{
-      if(!m.docId) return;
+  // Fill each card with the player's stored profile in both Legacy and
+  // Dropdown views. The live player list this page already listens to holds
+  // every field the card needs, so use it and only read a document when that
+  // player is not in the list (a read per player here used to burn one read
+  // per lineup spot on every open).
+  const _byDoc={}, _byId={};
+  (_playerCache||[]).forEach(pl=>{
+    if(pl.docId) _byDoc[String(pl.docId)]=pl;
+    if(pl.id!=null) _byId[String(pl.id)]=pl;
+  });
+  const _fillFromCache=(m,pl)=>{
+    if(!pl) return false;
+    m.position=pl.position||''; m.cls=pl.cls||'';
+    m.dob=pl.dob||''; m.bats=(pl.bats||''); m.throws=(pl.throws||''); m.agent=(pl.agent||'');
+    m.loaded=true;
+    return true;
+  };
+  const _missing=[];
+  model.forEach(m=>{
+    if(!m.docId) return;
+    if(_fillFromCache(m,_byDoc[String(m.docId)]||_byId[String(m.docId)])) return;
+    _missing.push(m);
+  });
+  if(_db && _missing.length){
+    await Promise.all(_missing.map(async m=>{
       try{ const doc=await _db.collection(COLLECTION).doc(String(m.docId)).get();
         if(doc && doc.exists){ const d=doc.data()||{};
           m.position=d.position||d.pos||''; m.cls=d.class||d.year||d.grade||'';
@@ -1015,7 +1041,20 @@ async function editPlayersModal(){
     const data={ player_name:newName, position:m.position||'', class:m.cls||'', bats:m.bats||'', throws:m.throws||'', dob:m.dob||'', agent:m.agent||'' };
     if(id) data.player_id=id;
     if(id && _db){
-      const ok=await writePlayerDoc(id, data); if(ok) dbWrites++;
+      // Nothing changed on this card: the database already holds these exact
+      // values, so skip the write (one write per player was the whole cost of
+      // opening Save with no edits).
+      const _c=_byDoc[String(id)]||_byId[String(id)];
+      const _same = !!(m.loaded && _c && String(_c.docId||'')===String(id) && String(_c.id)===String(id)
+        && String(_c.name||'')===newName
+        && String(_c.position||'')===String(data.position)
+        && String(_c.cls||'')===String(data['class']||'')
+        && String(_c.bats||'')===String(data.bats)
+        && String(_c.throws||'')===String(data.throws)
+        && String(_c.dob||'')===String(data.dob)
+        && String(_c.agent||'')===String(data.agent));
+      if(_same){ dbWrites++; }
+      else { const ok=await writePlayerDoc(id, data); if(ok) dbWrites++; }
       // Canonicalize to one doc keyed by the Player ID (doc id == player_id).
       // Remove any OTHER doc that represented this same profile so an edit
       // never leaves a duplicate behind:
@@ -1656,7 +1695,12 @@ async function resolvePlayerForData(sess, name){
   if(id==null || id==='') return null;
   const docId=hit ? (hit.docId||hit.id) : id;
   let bats='', throws='';
-  if(_db){
+  if(hit && _playerCacheReady){
+    // Already in the live list -- no read needed (this used to be one read per
+    // exported player).
+    bats=(hit.bats||'').toString().charAt(0).toLowerCase();
+    throws=(hit.throws||'').toString().charAt(0).toLowerCase();
+  } else if(_db){
     try{ const doc=await _db.collection(COLLECTION).doc(String(docId)).get();
       if(doc && doc.exists){ const d=doc.data()||{};
         bats=(d.bats||d.bat||'').toString().charAt(0).toLowerCase();
@@ -1710,11 +1754,28 @@ async function stampDataCsvStatus(sess, players){
   if(!_db || !players || !players.length) return;
   const mdy=sessDateToMDY(sess.date);
   if(!mdy) return;
-  let n=0;
-  for(const p of players){
+  const ids=[];
+  players.forEach(p=>{
     const docId=p.docId||p.id;
-    if(docId==null || docId==='') continue;
-    try{ await _db.collection(COLLECTION).doc(String(docId)).set({status:{Trackman:mdy}}, {merge:true}); n++; }catch(e){}
+    if(docId==null || docId==='') return;
+    const k=String(docId); if(ids.indexOf(k)<0) ids.push(k);
+  });
+  if(!ids.length) return;
+  const payload={status:{Trackman:mdy}};
+  let n=0;
+  const CHUNK=400;   // Firestore allows at most 500 operations per batch
+  for(let i=0;i<ids.length;i+=CHUNK){
+    const slice=ids.slice(i,i+CHUNK);
+    if(typeof _db.batch==='function'){
+      try{
+        const b=_db.batch();
+        slice.forEach(k=> b.set(_db.collection(COLLECTION).doc(k), payload, {merge:true}));
+        await b.commit(); n+=slice.length; continue;
+      }catch(e){ /* fall back to one write per player below */ }
+    }
+    for(const k of slice){
+      try{ await _db.collection(COLLECTION).doc(k).set(payload, {merge:true}); n++; }catch(e){}
+    }
   }
   if(n) showToast('Status updated \u2022 '+n+' player'+(n!==1?'s':'')+' (Trackman '+mdy+')');
 }

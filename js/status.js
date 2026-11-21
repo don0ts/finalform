@@ -279,7 +279,8 @@ function setGroupChecked(r,g,want,cb){
     // never stamped with an unrelated "today", and fall back to today only
     // when no event is known at all.
     var mdy=_eventDateFor(p)||_todayMDY();
-    job=Promise.resolve(DB.setStatusDate(p,g,mdy)).then(function(){ return DB.pushStatusHist?DB.pushStatusHist(p,g,mdy):null; });
+    if(DB.setStatusDateHist) job=Promise.resolve(DB.setStatusDateHist(p,g,mdy));
+    else job=Promise.resolve(DB.setStatusDate(p,g,mdy)).then(function(){ return DB.pushStatusHist?DB.pushStatusHist(p,g,mdy):null; });
     showToast(g+' set to '+mdy);
   } else {
     // Unchecking: fall back to the previous date taken, or blank if none.
@@ -377,9 +378,12 @@ function openDateEdit(r,group,val){
     var mdy=p[1]+'/'+p[2]+'/'+p[0];
     if(!DB||!DB.setStatusDate){ showToast('Not connected to the database',true); return; }
     save.disabled=true;
-    Promise.resolve(DB.setStatusDate(idOf(r),group,mdy)).then(function(){
-      return DB.pushStatusHist?DB.pushStatusHist(idOf(r),group,mdy):null;
-    }).then(function(){
+    var _w=(DB.setStatusDateHist
+      ? Promise.resolve(DB.setStatusDateHist(idOf(r),group,mdy))
+      : Promise.resolve(DB.setStatusDate(idOf(r),group,mdy)).then(function(){
+          return DB.pushStatusHist?DB.pushStatusHist(idOf(r),group,mdy):null;
+        }));
+    _w.then(function(){
       closeModal(); showToast(group+' date updated');
     }).catch(function(e){ save.disabled=false; showToast('Save failed: '+(e&&e.message||e),true); });
   });

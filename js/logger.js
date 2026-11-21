@@ -58,7 +58,10 @@ function startPlayerCacheListener(){
   try {
     _db.collection(COLLECTION).onSnapshot(
       snap => {
-        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id) }; });
+        const list = snap.docs.map(d => { const data=d.data(); return { id:playerDocId(data, d.id), docId:d.id, name:playerDocName(data, d.id),
+          position:(data.position||data.pos||''), cls:(data.class||data.year||data.grade||''),
+          bats:(data.bats||data.bat||''), throws:(data.throws||data.throw||''),
+          agent:(data.agent||data.agents||''), dob:(data.dob||data.birthdate||data.birth_date||'') }; });
         list.sort((a,b)=> a.name.localeCompare(b.name));
         _playerCache = list; _playerCache._listening = true;
         _playerCacheReady = true; _playerCacheError = false;
@@ -648,11 +651,24 @@ async function editPlayersModal(){
       isPitcher: pitchers.includes(name),
       position:'', cls:'', dob:'', bats:'', throws:'', agent:'', loaded:false };
   });
-  // Pull each player's stored profile (parallel) so every card shows its
-  // current values in both Legacy and Dropdown views.
-  if(_db){
-    await Promise.all(model.map(async m=>{
-      if(!m.docId) return;
+  // Fill each card from the live player list this page already listens to (it
+  // carries every field the card needs) and only read a document for a player
+  // the list does not have -- this used to be one read per lineup spot.
+  const _byDoc={}, _byId={};
+  (_playerCache||[]).forEach(pl=>{
+    if(pl.docId) _byDoc[String(pl.docId)]=pl;
+    if(pl.id!=null) _byId[String(pl.id)]=pl;
+  });
+  const _missing=[];
+  model.forEach(m=>{
+    if(!m.docId) return;
+    const pl=_byDoc[String(m.docId)]||_byId[String(m.docId)];
+    if(pl){ m.position=pl.position||''; m.cls=pl.cls||''; m.dob=pl.dob||''; m.bats=(pl.bats||'');
+      m.throws=(pl.throws||''); m.agent=(pl.agent||''); m.loaded=true; return; }
+    _missing.push(m);
+  });
+  if(_db && _missing.length){
+    await Promise.all(_missing.map(async m=>{
       try{ const doc=await _db.collection(COLLECTION).doc(String(m.docId)).get();
         if(doc && doc.exists){ const d=doc.data()||{};
           m.position=d.position||d.pos||''; m.cls=d.class||d.year||d.grade||'';
@@ -749,7 +765,17 @@ async function editPlayersModal(){
     const data={ player_name:newName, position:m.position||'', class:m.cls||'', bats:m.bats||'', throws:m.throws||'', dob:m.dob||'', agent:m.agent||'' };
     if(id) data.player_id=id;
     if(id && _db){
-      const ok=await writePlayerDoc(id, data); if(ok) dbWrites++;
+      const _c=_byDoc[String(id)]||_byId[String(id)];
+      const _same = !!(m.loaded && _c && String(_c.docId||'')===String(id) && String(_c.id)===String(id)
+        && String(_c.name||'')===newName
+        && String(_c.position||'')===String(data.position)
+        && String(_c.cls||'')===String(data['class']||'')
+        && String(_c.bats||'')===String(data.bats)
+        && String(_c.throws||'')===String(data.throws)
+        && String(_c.dob||'')===String(data.dob)
+        && String(_c.agent||'')===String(data.agent));
+      if(_same){ dbWrites++; }   // already identical in the database: no write
+      else { const ok=await writePlayerDoc(id, data); if(ok) dbWrites++; }
       if(m.origId && String(m.origId)!==String(id)){ try{ await _db.collection(COLLECTION).doc(String(m.origId)).delete(); }catch(e){} }
     }
     if(newName!==m.origName){
@@ -1404,7 +1430,10 @@ async function resolvePlayerForData(sess, name){
   if(id==null || id==='') return null;
   const docId=hit ? (hit.docId||hit.id) : id;
   let bats='', throws='';
-  if(_db){
+  if(hit && _playerCacheReady){
+    bats=(hit.bats||'').toString().charAt(0).toLowerCase();
+    throws=(hit.throws||'').toString().charAt(0).toLowerCase();
+  } else if(_db){
     try{ const doc=await _db.collection(COLLECTION).doc(String(docId)).get();
       if(doc && doc.exists){ const d=doc.data()||{};
         bats=(d.bats||d.bat||'').toString().charAt(0).toLowerCase();

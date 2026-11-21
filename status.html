@@ -97,7 +97,8 @@ Promise.all([sdkLoad('firebase-app.js'), sdkLoad('firebase-firestore.js')]).then
   var initializeApp=appMod.initializeApp;
   var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc, getDocs=fsMod.getDocs,
       setDoc=fsMod.setDoc, updateDoc=fsMod.updateDoc, deleteDoc=fsMod.deleteDoc, deleteField=fsMod.deleteField,
-      onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence;
+      onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence,
+      arrayUnion=fsMod.arrayUnion, arrayRemove=fsMod.arrayRemove;
 
   try {
     const app = initializeApp(FBC);
@@ -114,31 +115,38 @@ Promise.all([sdkLoad('firebase-app.js'), sdkLoad('firebase-firestore.js')]).then
       remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
       setStatusDate(id, group, value){ var u={}; u['status.'+group]=value; return updateDoc(doc(db, COLLECTION, String(id)), u); },
       clearStatusDate(id, group){ var u={}; u['status.'+group]=deleteField(); return updateDoc(doc(db, COLLECTION, String(id)), u); },
+      // Set the date AND record it in that group's history in a single write
+      // (arrayUnion never duplicates), so one click costs one write instead of
+      // two, and the date is always in the history the moment it is set.
+      setStatusDateHist(id, group, value){
+        var u={}; u['status.'+group]=value; u['statusHist.'+group]=arrayUnion(String(value));
+        return updateDoc(doc(db, COLLECTION, String(id)), u);
+      },
+      // Revert/clear the date and drop it from history in a single write.
+      clearStatusDateHist(id, group, value){
+        var u={}; u['status.'+group]=deleteField();
+        u['statusHist.'+group]=(value===undefined||value===null||value==='')?deleteField():arrayRemove(String(value));
+        return updateDoc(doc(db, COLLECTION, String(id)), u);
+      },
+      // Revert to an earlier date and drop the deleted one in a single write.
+      setStatusAndDropHist(id, group, value, drop){
+        var u={}; u['status.'+group]=value;
+        u['statusHist.'+group]=(drop===undefined||drop===null||drop==='')?deleteField():arrayRemove(String(drop));
+        return updateDoc(doc(db, COLLECTION, String(id)), u);
+      },
       // Append a date to that group's dated history (used to step back when a
-      // group checkbox is turned off). Keeps the newest 40, newest first.
+      // group checkbox is turned off). arrayUnion adds it only if it is not
+      // already there, and needs no read first -- this used to be a read + a
+      // write for every click. The page sorts the dates, so order is irrelevant.
       pushStatusHist(id, group, value){
-        var ref=doc(db, COLLECTION, String(id));
-        return getDoc(ref).then(function(snap){
-          var data=snap.exists()?snap.data():{};
-          var hist=(data.statusHist&&data.statusHist[group])||[];
-          hist=hist.filter(function(x){ return String(x)!==String(value); });
-          hist.unshift(String(value));
-          if(hist.length>40) hist=hist.slice(0,40);
-          var u={}; u['statusHist.'+group]=hist;
-          return updateDoc(ref,u);
-        });
+        var u={}; u['statusHist.'+group]=arrayUnion(String(value));
+        return updateDoc(doc(db, COLLECTION, String(id)), u);
       },
       // Remove one date from a group's history (the content for that date was
-      // deleted, so it must never be stepped back onto).
+      // deleted, so it must never be stepped back onto). No read needed.
       removeStatusHist(id, group, value){
-        var ref=doc(db, COLLECTION, String(id));
-        return getDoc(ref).then(function(snap){
-          var data=snap.exists()?snap.data():{};
-          var hist=(data.statusHist&&data.statusHist[group])||[];
-          hist=hist.filter(function(x){ return String(x)!==String(value); });
-          var u={}; u['statusHist.'+group]=hist;
-          return updateDoc(ref,u);
-        });
+        var u={}; u['statusHist.'+group]=arrayRemove(String(value));
+        return updateDoc(doc(db, COLLECTION, String(id)), u);
       }
     };
     window.CubSentryDB = api;

@@ -791,8 +791,13 @@ function _adoptIncomingRowValues(merged, localEv, incoming, incEv){
   }catch(e){}
 }
 var _evSwept=false;
-function applyDbEvents(list, snap){
+// `opts.partial` says the list is only the documents that CHANGED (the HTTPS
+// fallback asks for "saved since X" so an idle poll costs no reads). Such a list
+// must never be treated as "everything the database has": doing that deleted
+// every other saved event from the page until a reload brought them back.
+function applyDbEvents(list, snap, opts){
   if(!Array.isArray(list)) return;
+  var _complete=!(opts&&opts.partial);
   // True when this snapshot still contains a doc we have already saved a NEWER
   // version of. Such a snapshot must not be applied to the event we are editing.
   var staleOwned=(function(){
@@ -819,7 +824,9 @@ function applyDbEvents(list, snap){
   // actually propagated (the doc no longer comes back in the snapshot).
   var incomingIds={};
   list.forEach(function(d){ var id=d&&(d._id||d.event_id); if(id) incomingIds[id]=1; });
-  Object.keys(_recentlyRemovedEvents).forEach(function(id){ if(!incomingIds[id] || !_isRecentlyRemoved(id)) delete _recentlyRemovedEvents[id]; });
+  if(_complete){
+    Object.keys(_recentlyRemovedEvents).forEach(function(id){ if(!incomingIds[id] || !_isRecentlyRemoved(id)) delete _recentlyRemovedEvents[id]; });
+  }
   list.forEach(function(docu){
     var id=docu&&(docu._id||docu.event_id); if(!id) return;
     // Find an existing local event tracking this DB doc id.
@@ -927,7 +934,7 @@ function applyDbEvents(list, snap){
   // only against a real server snapshot; events never saved to the DB (no
   // _dbId) are left untouched, and the active event is never yanked out from
   // under an open editor / focused field.
-  for(var pdi=events.length-1;pdi>=0;pdi--){
+  for(var pdi=(_complete?events.length-1:-1);pdi>=0;pdi--){
     var pev=events[pdi];
     if(!pev._dbId || incomingIds[pev._dbId]) continue;
     var pActive=(activeIdx===pdi);
@@ -2877,27 +2884,69 @@ function dbDocId(p){
   const cubs=((PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'').toString().trim();
   return cubs || ensurePid(p);   // real ID when present, else the local fallback id
 }
-let _dbTimers={};
+// Profile writes are collected here for one short moment and then sent together:
+//   - a player whose document content has not changed since the last successful
+//     write is skipped entirely (no write, nothing to throttle),
+//   - everybody who really changed goes up in ONE batch commit instead of a
+//     request per player, which is what a roster-wide edit used to look like.
+// Nothing about WHICH data is stored changes -- only how many requests carry it.
+var _dbDirty={}, _dbFlushTimer=null;
+function _dbPayloadSig(id, data){ return String(id)+'|'+JSON.stringify(data||{}); }
 function scheduleDBSync(p){
   if(!p||!_cdb()) return;
   if(!playerName(p)) return;               // don't push blank players
   ensurePid(p);
   const id=dbDocId(p); if(!id) return;
-  const prev=p._syncId;
-  // Key timer by stable _pid so changing the player ID always cancels the
-  // previous debounce timer (old key was the NEW id, so the _pid timer was
-  // never cancelled → both fired → duplicate DB docs).
-  clearTimeout(_dbTimers[p._pid]);
-  _dbTimers[p._pid]=setTimeout(function(){
-    try{
-      _cdb().upsert(id, _pruneBlankDoc(playerToDoc(p)));
-      // ID changed (temp->real OR real->real): drop the old document so we EDIT
-      // the same profile instead of leaving a duplicate behind.
-      if(prev && prev!==id){ try{ _cdb().remove(prev); }catch(e){} }
-      p._syncId=id;
-    }catch(e){}
-  }, 600);
+  _dbDirty[p._pid]={ p:p, id:String(id) };
+  if(_dbFlushTimer) return;
+  _dbFlushTimer=setTimeout(_dbFlush, 700);
 }
+function _dbFlush(){
+  _dbFlushTimer=null;
+  var db=_cdb(); if(!db||!db.upsert) return;
+  var items=[];
+  Object.keys(_dbDirty).forEach(function(k){
+    var job=_dbDirty[k]; delete _dbDirty[k];
+    var p=job&&job.p; if(!p||!playerName(p)) return;
+    var data;
+    try{ data=_pruneBlankDoc(playerToDoc(p)); }catch(e){ return; }
+    var sig=_dbPayloadSig(job.id,data);
+    if(p._dbSig===sig){ return; }              // identical to the stored doc: skip
+    items.push({ p:p, id:job.id, data:data, sig:sig, prev:(p._syncId&&String(p._syncId)!==String(job.id))?String(p._syncId):'' });
+  });
+  if(!items.length) return;
+  function done(ok){
+    items.forEach(function(it){
+      if(!ok[it.id]) return;
+      it.p._dbSig=it.sig; it.p._syncId=it.id;
+      // ID changed (temp -> real, or real -> real): drop the old document ONLY
+      // now that the new one is safely written, so we edit one profile instead
+      // of leaving a duplicate behind (and never lose the profile on a failure).
+      if(it.prev){ try{ Promise.resolve(db.remove(it.prev)).catch(function(){}); }catch(e){} }
+    });
+  }
+  var fallback=function(){
+    // A batch is all-or-nothing: if the commit is refused, send the same writes
+    // one by one so one bad document cannot drop everybody else's edit.
+    var ok={};
+    return Promise.all(items.map(function(it){
+      return Promise.resolve(db.upsert(it.id, it.data)).then(function(){ ok[it.id]=true; })
+        .catch(function(err){ try{ console.warn('profile write failed', it.id, err&&(err.code||err.message)); }catch(e){} });
+    })).then(function(){ return ok; });
+  };
+  var run;
+  try{
+    if(db.upsertMany){
+      run=Promise.resolve(db.upsertMany(items.map(function(it){ return { id:it.id, data:it.data }; })))
+        .then(function(){ var ok={}; items.forEach(function(it){ ok[it.id]=true; }); return ok; })
+        .catch(function(err){ console.warn('batch write refused, retrying one by one', err&&(err.code||err.message)); return fallback(); });
+    } else {
+      run=fallback();
+    }
+  }catch(e){ run=fallback(); }
+  run.then(done).catch(function(){});
+}
+
 function ensurePid(p){ if(!p._pid) p._pid='p'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); return p._pid; }
 // ---- Live INBOUND sync: when a profile is edited elsewhere (e.g. the Profiles
 // page) the change lands in the DB; this refreshes the matching player already
@@ -3209,6 +3258,7 @@ function saveToStatus(silent){
   var db=_cdb();
   var cache=db.players()||[];
   var n=0;
+  var _statusQueue=[];
   players.forEach(function(p){
     if(!playerName(p)) return;
     var taken=STATUS_GROUPS.filter(function(g){ return groupTaken(p,g); });
@@ -3229,7 +3279,6 @@ function saveToStatus(silent){
     // measurables / Data Entry content deleted) must lose this event's date.
     // It steps back to the last OTHER event date that group was captured on;
     // with no earlier date left the timestamp is blanked entirely.
-    var _gone=_statusGroupsRemovedHere(p,dt,STATUS_GROUPS);
     var _revert=_statusRevertMap(p,dt,clearArm?['Arm Strength']:[]);
     STATUS_GROUPS.forEach(function(g){
       var was=String(status[g.name]||'');
@@ -3247,42 +3296,43 @@ function saveToStatus(silent){
     // THE big write/read saver. This function used to push every player's profile
     // document plus a history entry per data group on every call -- and it is
     // called after every event save, so one charting session could burn thousands
-    // of writes. Nothing is sent now unless the stored dates actually differ.
+    // of writes. Nothing is sent now unless the stored dates actually differ, and
+    // a player who does need updating costs exactly ONE write: the profile, the
+    // status dates and the history changes travel together (the history used to
+    // cost a read + a write for every single group).
     if(_statusCompact(existing)===_statusCompact(status)) return;
-    // Newer event captured later than the current value -> this event is the
-    // latest date for the group, which is exactly the "delete moves it forward"
-    // case; older events never move a date backwards.
+    var _histAdd=[], _histDel=[];
+    // Keep a dated history per group so the Status page can step back to the
+    // previous date taken when a group checkbox is turned off. Only a date that
+    // is NEW for the group is added (re-confirming changes nothing).
+    taken.forEach(function(g){
+      if(_sameDate(String(existing[g.name]||''),dt)) return;
+      _histAdd.push({ g:g.name, v:dt });
+    });
+    // A group that does not hold data in this event must not keep this event's
+    // date in its history either, otherwise a later uncheck could step back onto
+    // a date that holds nothing.
+    STATUS_GROUPS.forEach(function(g){
+      if(taken.indexOf(g)>=0) return;
+      if(!_sameDate(String(existing[g.name]||''),dt)) return;
+      _histDel.push({ g:g.name, v:dt });
+    });
     try{
-      _cdb().upsert(id, Object.assign(_pruneBlankDoc(playerToDoc(p)),{status:status}));
-      // Keep a dated history per group so the Status page can step back to the
-      // previous date taken when a group checkbox is turned off.
-      if(db&&db.pushStatusHist){
-        taken.forEach(function(g){
-          // Only when this event's date is NEW for the group. Re-confirming a date
-          // that is already stored is a read + write that changes nothing.
-          if(_sameDate(String(existing[g.name]||''),dt)) return;
-          try{ Promise.resolve(db.pushStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
-        });
-        // Drop this event's date from the history of every group that was
-        // cleared here, so a later uncheck can never step back onto a date
-        // that no longer holds any data.
-        _gone.forEach(function(g){
-          if(!_sameDate(String(existing[g.name]||''),dt)) return;
-          if(typeof db.removeStatusHist==='function'){
-            try{ Promise.resolve(db.removeStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
-          }
-        });
-        // A group that does not hold data in this event must not keep this
-        // event's date in its history either, otherwise a later uncheck could
-        // step back onto a date that holds nothing.
-        STATUS_GROUPS.forEach(function(g){
-          if(taken.indexOf(g)>=0) return;
-          // Nothing stored for this date -> nothing to remove (and no read).
-          if(!_sameDate(String(existing[g.name]||''),dt)) return;
-          if(typeof db.removeStatusHist==='function'){
-            try{ Promise.resolve(db.removeStatusHist(id,g.name,dt)).catch(function(){}); }catch(e){}
-          }
-        });
+      var _payload=Object.assign(_pruneBlankDoc(playerToDoc(p)),{status:status});
+      if(db&&typeof db.upsertStatus==='function'){
+        // The profile part of this write is exactly what a profile sync would
+        // send, so remember its signature: the pending debounce then has nothing
+        // left to do instead of writing the same document again.
+        var _profSig=_dbPayloadSig(String(id),_pruneBlankDoc(playerToDoc(p)));
+        _statusQueue.push({ id:String(id), data:_payload, add:_histAdd, del:_histDel, sig:_profSig, p:p });
+      } else {
+        // Older cached page: the previous behaviour, still correct, just more
+        // requests (a write per group for the history).
+        _cdb().upsert(id,_payload);
+        if(db&&db.pushStatusHist){
+          _histAdd.forEach(function(h){ try{ Promise.resolve(db.pushStatusHist(id,h.g,h.v)).catch(function(){}); }catch(e){} });
+          _histDel.forEach(function(h){ try{ Promise.resolve(db.removeStatusHist(id,h.g,h.v)).catch(function(){}); }catch(e){} });
+        }
       }
       // Keep the local copy in step: without this the next call would compare
       // against a stale doc and write the same values again.
@@ -3293,6 +3343,28 @@ function saveToStatus(silent){
       n++;
     }catch(e){}
   });
+  // Send the whole changed roster as ONE request instead of one write per
+  // player: the documents billed are the same, but the burst of parallel
+  // requests (the thing a rate-limited device answers with 429) goes away.
+  if(_statusQueue.length){
+    var _q=_statusQueue.slice();
+    _statusQueue.length=0;
+    var _after=function(){
+      _q.forEach(function(it){ try{ it.p._dbSig=it.sig; it.p._syncId=it.id; }catch(e){} });
+    };
+    var _oneByOne=function(){
+      return Promise.all(_q.map(function(it){
+        return Promise.resolve(db.upsertStatus(it.id,it.data,it.add,it.del)).catch(function(){});
+      }));
+    };
+    if(typeof db.upsertStatusMany==='function'){
+      Promise.resolve(db.upsertStatusMany(_q.map(function(it){ return { id:it.id, data:it.data, add:it.add, del:it.del }; })))
+        .then(_after)
+        .catch(function(){ return _oneByOne().then(_after); });
+    } else {
+      _oneByOne().then(_after);
+    }
+  }
   if(!silent) showToast(n?('Saved to Status • '+n+' player'+(n!==1?'s':'')):'No data groups to save yet');
 }
 function _sameDevIdentity(p, x, devKey){

@@ -198,7 +198,8 @@ else {
     var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc,
         setDoc=fsMod.setDoc, updateDoc=fsMod.updateDoc, deleteDoc=fsMod.deleteDoc, deleteField=fsMod.deleteField,
         onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence,
-        query=fsMod.query, limit=fsMod.limit, getDocs=fsMod.getDocs;
+        query=fsMod.query, limit=fsMod.limit, getDocs=fsMod.getDocs,
+        arrayUnion=fsMod.arrayUnion, arrayRemove=fsMod.arrayRemove, writeBatch=fsMod.writeBatch;
 
     var COLLECTION = "Players";          // Firestore collection holding player documents
     var EVENTS_COLLECTION = "Events";    // Firestore collection holding saved events
@@ -234,6 +235,7 @@ else {
       // is 35+ document reads a poll -- thousands a day for nothing. With a
       // "saved_at >= last seen" query an idle poll returns nothing (0 reads).
       var _evRestSince = '';
+      var _evRestFull = false;   // did the last HTTPS read return the WHOLE collection?
       function _restEventList(){
         if(!FBC.projectId || !FBC.apiKey || typeof fetch !== 'function') return Promise.resolve(null);
         var base='https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(FBC.projectId)+
@@ -255,11 +257,13 @@ else {
           })};
         }
         return fetch(url,opt).then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); }).then(function(j){
-          if(Array.isArray(j) && _evRestSince){        // runQuery answer
+          if(Array.isArray(j) && _evRestSince){        // runQuery answer (changed docs only)
             var rows=[];
             j.forEach(function(one){ if(one && one.document) rows.push(one.document); });
+            _evRestFull=false;
             return rows.map(_mapRestEvent);
           }
+          _evRestFull=!(j&&j.nextPageToken);          // paged answer is not the whole set
           return ((j&&j.documents)||[]).map(_mapRestEvent);
         });
       }
@@ -298,6 +302,7 @@ else {
         _evPollTimer = null;
         try{ if(document.hidden){ _evPollSchedule(_evPollGap); return; } }catch(e){}
         if(Date.now()-_evLastSnap < 15000){ _evPollSchedule(5000); return; }
+        var _wasDelta=!!_evRestSince;   // true = this read only returns changed docs
         _restEventList().then(function(list){
           if(!list){ _evPollSchedule(_evPollGap); return; }
           _evLastSnap = Date.now();
@@ -305,7 +310,10 @@ else {
           if(list.length){
             _evRestNoteSince(list);
             connState('ok','Connected (HTTP refresh)');
-            if(window.__applyDbEvents){ try { window.__applyDbEvents(list, null); } catch(e){} }
+            // `partial` when this was the "changed since last time" query: the
+            // page must then NOT treat the list as the whole collection (that
+            // used to hide every other saved event until a reload).
+            if(window.__applyDbEvents){ try { window.__applyDbEvents(list, null, { partial: (_wasDelta || !_evRestFull) }); } catch(e){} }
           }
           _evPollSchedule(_evPollGap);
         }).catch(function(err){
@@ -334,31 +342,55 @@ else {
         onChange(fn){ listeners.push(fn); },
         upsert(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
         remove(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
-        // Append a date to that group's dated history (newest first, max 40) so the
-        // Status page can step back to the previous date when a box is unchecked.
+        // Several players in ONE request: one batch commit instead of a write per
+        // player. Firestore bills per document either way, but this removes the
+        // burst of parallel requests that a roster-wide edit used to create (and
+        // that a rate-limited device answers with 429).
+        upsertMany(items){
+          if(!items||!items.length) return Promise.resolve(0);
+          var b=writeBatch(db);
+          items.forEach(function(it){ b.set(doc(db, COLLECTION, String(it.id)), it.data, { merge: true }); });
+          return b.commit().then(function(){ return items.length; });
+        },
+        // One write that carries the profile, its status dates AND the history
+        // changes together. arrayUnion/arrayRemove add/remove a date without
+        // reading the document first (that read used to cost one read + one write
+        // per data group, on every status sync).
+        upsertStatus(id, data, add, del){
+          var payload=Object.assign({}, data||{});
+          (add||[]).forEach(function(h){ payload['statusHist.'+h.g]=arrayUnion(String(h.v)); });
+          (del||[]).forEach(function(h){ if(payload['statusHist.'+h.g]) return; payload['statusHist.'+h.g]=arrayRemove(String(h.v)); });
+          return setDoc(doc(db, COLLECTION, String(id)), payload, { merge: true });
+        },
+        // Same single write as upsertStatus, but for a whole roster in ONE
+        // request (chunked at 400, the batch limit being 500).
+        upsertStatusMany(items){
+          if(!items||!items.length) return Promise.resolve(0);
+          var groups=[], i;
+          for(i=0;i<items.length;i+=400) groups.push(items.slice(i,i+400));
+          var done=0;
+          return groups.reduce(function(chain, slice){
+            return chain.then(function(){
+              var b=writeBatch(db);
+              slice.forEach(function(it){
+                var payload=Object.assign({}, it.data||{});
+                (it.add||[]).forEach(function(h){ payload['statusHist.'+h.g]=arrayUnion(String(h.v)); });
+                (it.del||[]).forEach(function(h){ if(payload['statusHist.'+h.g]) return; payload['statusHist.'+h.g]=arrayRemove(String(h.v)); });
+                b.set(doc(db, COLLECTION, String(it.id)), payload, { merge: true });
+              });
+              return b.commit().then(function(){ done+=slice.length; });
+            });
+          },Promise.resolve()).then(function(){ return done; });
+        },
         pushStatusHist(id, group, value){
-          var ref=doc(db, COLLECTION, String(id));
-          return getDoc(ref).then(function(snap){
-            var data=snap.exists()?snap.data():{};
-            var hist=(data.statusHist&&data.statusHist[group])||[];
-            hist=hist.filter(function(x){ return String(x)!==String(value); });
-            hist.unshift(String(value));
-            if(hist.length>40) hist=hist.slice(0,40);
-            var u={}; u['statusHist.'+group]=hist;
-            return updateDoc(ref,u);
-          });
+          var u={}; u['statusHist.'+group]=arrayUnion(String(value));
+          return updateDoc(doc(db, COLLECTION, String(id)), u);
         },
         // Remove one date from a group's history (the content for that date was
         // deleted, so it must never be stepped back onto).
         removeStatusHist(id, group, value){
-          var ref=doc(db, COLLECTION, String(id));
-          return getDoc(ref).then(function(snap){
-            var data=snap.exists()?snap.data():{};
-            var hist=(data.statusHist&&data.statusHist[group])||[];
-            hist=hist.filter(function(x){ return String(x)!==String(value); });
-            var u={}; u['statusHist.'+group]=hist;
-            return updateDoc(ref,u);
-          });
+          var u={}; u['statusHist.'+group]=arrayRemove(String(value));
+          return updateDoc(doc(db, COLLECTION, String(id)), u);
         },
         eventUpsert(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
         eventRemove(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
@@ -375,27 +407,43 @@ else {
           onChange:function(fn){ listeners.push(fn); },
           upsert:function(id, data){ return setDoc(doc(db, COLLECTION, String(id)), data, { merge: true }); },
           remove:function(id){ return deleteDoc(doc(db, COLLECTION, String(id))); },
+          upsertMany:function(items){
+            if(!items||!items.length) return Promise.resolve(0);
+            var b=writeBatch(db);
+            items.forEach(function(it){ b.set(doc(db, COLLECTION, String(it.id)), it.data, { merge: true }); });
+            return b.commit().then(function(){ return items.length; });
+          },
+          upsertStatus:function(id, data, add, del){
+            var payload=Object.assign({}, data||{});
+            (add||[]).forEach(function(h){ payload['statusHist.'+h.g]=arrayUnion(String(h.v)); });
+            (del||[]).forEach(function(h){ if(payload['statusHist.'+h.g]) return; payload['statusHist.'+h.g]=arrayRemove(String(h.v)); });
+            return setDoc(doc(db, COLLECTION, String(id)), payload, { merge: true });
+          },
+          upsertStatusMany:function(items){
+            if(!items||!items.length) return Promise.resolve(0);
+            var groups=[], i;
+            for(i=0;i<items.length;i+=400) groups.push(items.slice(i,i+400));
+            var done=0;
+            return groups.reduce(function(chain, slice){
+              return chain.then(function(){
+                var b=writeBatch(db);
+                slice.forEach(function(it){
+                  var payload=Object.assign({}, it.data||{});
+                  (it.add||[]).forEach(function(h){ payload['statusHist.'+h.g]=arrayUnion(String(h.v)); });
+                  (it.del||[]).forEach(function(h){ if(payload['statusHist.'+h.g]) return; payload['statusHist.'+h.g]=arrayRemove(String(h.v)); });
+                  b.set(doc(db, COLLECTION, String(it.id)), payload, { merge: true });
+                });
+                return b.commit().then(function(){ done+=slice.length; });
+              });
+            },Promise.resolve()).then(function(){ return done; });
+          },
           pushStatusHist:function(id, group, value){
-            var ref=doc(db, COLLECTION, String(id));
-            return getDoc(ref).then(function(snap){
-              var data=snap.exists()?snap.data():{};
-              var hist=(data.statusHist && data.statusHist[group])||[];
-              hist=hist.filter(function(x){ return String(x)!==String(value); });
-              hist.unshift(String(value));
-              if(hist.length>40) hist=hist.slice(0,40);
-              var u={}; u['statusHist.'+group]=hist;
-              return updateDoc(ref,u);
-            });
+            var u={}; u['statusHist.'+group]=arrayUnion(String(value));
+            return updateDoc(doc(db, COLLECTION, String(id)), u);
           },
           removeStatusHist:function(id, group, value){
-            var ref=doc(db, COLLECTION, String(id));
-            return getDoc(ref).then(function(snap){
-              var data=snap.exists()?snap.data():{};
-              var hist=(data.statusHist && data.statusHist[group])||[];
-              hist=hist.filter(function(x){ return String(x)!==String(value); });
-              var u={}; u['statusHist.'+group]=hist;
-              return updateDoc(ref,u);
-            });
+            var u={}; u['statusHist.'+group]=arrayRemove(String(value));
+            return updateDoc(doc(db, COLLECTION, String(id)), u);
           },
           eventUpsert:function(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
           eventRemove:function(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
