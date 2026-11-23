@@ -866,6 +866,8 @@ function applyDbEvents(list, snap, opts){
     // A "real" payload actually carries event content (name/date/players).
     var hasPayload=!!(parsed&&typeof parsed==='object'&&(parsed.players!==undefined||parsed.name!==undefined||parsed.date!==undefined));
     var incoming=(parsed&&typeof parsed==='object')?parsed:{name:docu.name||'',date:docu.date||'',players:[]};
+    // Bind activity to the actual database document, never a copied history ID.
+    incoming._dbId=id;
     if(!Array.isArray(incoming.players)) incoming.players=[];
     if((incoming._removedPlayers||[]).length) incoming=_filterRemovedRoster(incoming,incoming._removedPlayers);
     if(idx<0){
@@ -2988,6 +2990,7 @@ function ensureData(ev){
 }
 const NAME_IDX=(SCHEMA.ui_groups[0].fields.find(f=>f.name==='Name')||{}).idx;
 function playerName(p){ return String(p[NAME_IDX]||'').trim(); }
+if(window.ActivitySync)window.ActivitySync.configure(NAME_IDX,PIDCUBS_IDX);
 function _cdb(){ return (typeof window!=='undefined')?window.CubSentryDB:undefined; }
 // ---- Firestore sync: map a local player to the DB doc shape, then upsert (debounced) ----
 function playerToDoc(p){
