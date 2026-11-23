@@ -120,6 +120,7 @@
 <div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
 <div class="overlay" id="overlay2" style="z-index:60"><div class="modal" id="modal2" style="max-width:560px"></div></div>
 
+<script src="js/activity-sync.js"></script>
 <script src="js/index.js"></script>
 <script src="js/firebase_config.js"></script>
 <script type="module">
@@ -199,7 +200,7 @@ else {
         setDoc=fsMod.setDoc, updateDoc=fsMod.updateDoc, deleteDoc=fsMod.deleteDoc, deleteField=fsMod.deleteField,
         onSnapshot=fsMod.onSnapshot, enableIndexedDbPersistence=fsMod.enableIndexedDbPersistence,
         query=fsMod.query, limit=fsMod.limit, getDocs=fsMod.getDocs,
-        arrayUnion=fsMod.arrayUnion, arrayRemove=fsMod.arrayRemove, writeBatch=fsMod.writeBatch;
+        arrayUnion=fsMod.arrayUnion, arrayRemove=fsMod.arrayRemove, writeBatch=fsMod.writeBatch, runTransaction=fsMod.runTransaction;
 
     var COLLECTION = "Players";          // Firestore collection holding player documents
     var EVENTS_COLLECTION = "Events";    // Firestore collection holding saved events
@@ -227,6 +228,19 @@ else {
         if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
       }, err => { console.warn("Firestore listen error:", err); connState('bad','Disconnected — showing saved data'); listeners.forEach(fn => { try { fn(); } catch(e){} }); });
       const evCol = collection(db, EVENTS_COLLECTION);
+      // Serialize conflicting writes to the same event; retry against its latest
+      // version instead of overwriting the other device's unchanged fields.
+      function writeActivityEvent(id,payload){
+        var ref=doc(db,EVENTS_COLLECTION,String(id));
+        if(!window.ActivitySync || !payload.data || payload.data.indexOf('"_activity"')<0)
+          return setDoc(ref,payload,{merge:true});
+        return runTransaction(db,function(tx){
+          return tx.get(ref).then(function(snap){
+            var combined=window.ActivitySync.payloadMerge(snap.exists()?snap.data():null,payload);
+            tx.set(ref,combined,{merge:true});
+          });
+        });
+      }
       var _evLastSnap = Date.now();
       // Fallback read for the Events collection over plain HTTPS. The live channel
       // can go quiet on a network that stalls streaming connections (the page then
@@ -392,7 +406,7 @@ else {
           var u={}; u['statusHist.'+group]=arrayRemove(String(value));
           return updateDoc(doc(db, COLLECTION, String(id)), u);
         },
-        eventUpsert(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
+        eventUpsert(id, data){ return writeActivityEvent(id,data); },
         eventRemove(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
       };
     } catch(e){ console.warn("Firebase init failed (app still works offline):", e); connState('bad','Not connected — working from saved data'); }
@@ -445,7 +459,7 @@ else {
             var u={}; u['statusHist.'+group]=arrayRemove(String(value));
             return updateDoc(doc(db, COLLECTION, String(id)), u);
           },
-          eventUpsert:function(id, data){ return setDoc(doc(db, EVENTS_COLLECTION, String(id)), data, { merge: true }); },
+          eventUpsert:function(id, data){ return writeActivityEvent(id,data); },
           eventRemove:function(id){ return deleteDoc(doc(db, EVENTS_COLLECTION, String(id))); }
         };
       }

@@ -171,6 +171,7 @@ function loadEvents(){
     // them where this app reads them, so a device tick always lands on the same
     // player on every device.
     ev.players.forEach(function(pl){ try{ _normPlayerIdx(pl); }catch(e){} });
+    if(window.ActivitySync) window.ActivitySync.prime(ev);
   });
 }
 // ---- Live event upload -------------------------------------------------
@@ -357,7 +358,7 @@ if(typeof window!=='undefined'){
   window.__evSnapStamp=function(){ return _lastLivePush; };
 }
 function persistEvents(force){
-  if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; _evMarkLocal(events[activeIdx]); }
+  if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; if(window.ActivitySync) window.ActivitySync.capture(events[activeIdx]); _evMarkLocal(events[activeIdx]); }
   try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
   if(hasActiveEvent() && players[current]) scheduleDBSync(players[current]);
   // An event that was created while the database could not be reached lives on
@@ -461,10 +462,28 @@ function _evRestUrl(id){
     '&updateMask.fieldPaths=event_id&updateMask.fieldPaths=name&updateMask.fieldPaths=date'+
     '&updateMask.fieldPaths=player_count&updateMask.fieldPaths=data&updateMask.fieldPaths=saved_at';
 }
-function _evRestWrite(id, payload){
+function _evRestWrite(id, payload, attempt){
   var url=_evRestUrl(id);
   if(!url) return Promise.reject(new Error('no config'));
   if(typeof fetch!=='function') return Promise.reject(new Error('no fetch'));
+  if(window.ActivitySync && payload.data && payload.data.indexOf('"_activity"')>=0 && !payload._restChecked){
+    var getUrl=url.split('&updateMask')[0];
+    return fetch(getUrl).then(function(r){
+      if(r.status===404)return null;
+      if(!r.ok)throw new Error('http-'+r.status);
+      return r.json();
+    }).then(function(docu){
+      var old=null;
+      if(docu){old={data:((docu.fields||{}).data||{}).stringValue||''};}
+      var next=window.ActivitySync.payloadMerge(old,payload);
+      next._restChecked=true; next._restUpdateTime=docu&&docu.updateTime;next._restExists=!!docu;
+      return _evRestWrite(id,next,attempt||0);
+    });
+  }
+  if(payload._restChecked){
+    if(payload._restUpdateTime)url+='&currentDocument.updateTime='+encodeURIComponent(payload._restUpdateTime);
+    else if(!payload._restExists)url+='&currentDocument.exists=false';
+  }
   var body={ fields:{
     event_id:{ stringValue:String(payload.event_id||id) },
     name:{ stringValue:String(payload.name||'') },
@@ -476,6 +495,10 @@ function _evRestWrite(id, payload){
   return fetch(url,{ method:'PATCH', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify(body) })
     .then(function(r){
       if(r.ok) return true;
+      if(payload._restChecked && (r.status===409||r.status===400||r.status===412) && (attempt||0)<4){
+        var retry=Object.assign({},payload); delete retry._restChecked;delete retry._restUpdateTime;delete retry._restExists;
+        return _evRestWrite(id,retry,(attempt||0)+1);
+      }
       var e=new Error('http-'+r.status); e.code='http-'+r.status; throw e;
     });
 }
@@ -851,7 +874,7 @@ function applyDbEvents(list, snap, opts){
       // resurrect the source event we intentionally removed.
       if(_isRecentlyRemoved(id)) return;
       incoming._dbId=id; incoming._fromDb=true;
-      events.push(incoming); changed=true;
+      events.push(incoming); if(window.ActivitySync) window.ActivitySync.prime(incoming); changed=true;
       return;
     }
     // Existing event -> refresh contents if the DB copy differs. Skip degenerate
@@ -861,6 +884,28 @@ function applyDbEvents(list, snap, opts){
     var isActive=(activeIdx===idx);
     // Keep remote updates queued, not lost, while the active name is a draft.
     if(isActive && _playerNameEditors.size){ _nameDeferredEvents[String(id)]=docu; return; }
+    if(window.ActivitySync && Object.keys(incoming._activity||{}).length){
+      var selectedPlayer=players[current];
+      var delta=window.ActivitySync.receive(ev,incoming);
+      if(delta.needsWrite) _evPushSoon(ev,900);
+      if(delta.changed){
+        changed=true;refreshed++;
+        if(isActive){
+          players=ev.players;
+          var next=players.indexOf(selectedPlayer);current=next>=0?next:Math.min(current,Math.max(0,players.length-1));
+          eventDate=ev.date||'';activeChanged=true;
+          syncFormValues();syncActivityUi();patchActivityPills();
+          ['eventDate','eventName'].forEach(function(k){var node=document.getElementById(k);if(node&&node!==document.activeElement)node.value=k==='eventDate'?mdyToISO(ev.date||''):(ev.name||'');});
+          if(delta.structural){
+            if(!popupOpen && !isFormFieldFocused()){
+              renderForm();if(mode==='data')renderDataEntry();
+            }
+          }
+        }
+      }
+      if(incStamp) ev._savedAt=new Date(incStamp).toISOString();
+      return;
+    }
     var _rosterRemovals=_combineRosterRemovals([ev,incoming]);
     var _rosterMetaChanged=JSON.stringify(ev._removedPlayers||[])!==JSON.stringify(_rosterRemovals);
     if(_rosterRemovals.length) incoming=_filterRemovedRoster(incoming,_rosterRemovals);
@@ -911,6 +956,7 @@ function applyDbEvents(list, snap, opts){
     // Merged Data Entry payload (device links / IDs / Time of Day) so tech captured
     // on another device shows up here without discarding tech captured locally.
     ev.data=merged.data;
+    if(window.ActivitySync) window.ActivitySync.prime(ev);
     // Adopt the incoming save stamp so a later identical echo is recognised as
     // "same version", and so this event is not re-pushed just because it arrived.
     if(incStamp) ev._savedAt=new Date(incStamp).toISOString();
@@ -965,13 +1011,16 @@ function applyDbEvents(list, snap, opts){
     // The roster object may have been swapped by the merge; point the UI at the
     // live array again so later edits write into the same player objects.
     if(activeChanged && hasActiveEvent()){ players=events[activeIdx].players; if(current>=players.length) current=Math.max(0,players.length-1); }
-    renderPlayers();
+    if(window.ActivitySync && hasActiveEvent() && Object.keys(events[activeIdx]._activity||{}).length)patchActivityPills();else renderPlayers();
     // Repaint both views for a change that came from the database. If the user is
     // mid-typing in the open form we patch its values in place instead of
     // rebuilding it, so nothing that changed elsewhere is left stale on screen
     // while the caret stays exactly where it was.
-    if(isFormFieldFocused()) syncFormValues(); else renderForm();
-    if(hasActiveEvent() && players.length) renderDataEntry();
+    if(window.ActivitySync && hasActiveEvent() && Object.keys(events[activeIdx]._activity||{}).length){
+      syncFormValues();updateFormVisibility(players[current]||{});
+    }else if(isFormFieldFocused()) syncFormValues(); else renderForm();
+    if(window.ActivitySync && hasActiveEvent() && Object.keys(events[activeIdx]._activity||{}).length) syncActivityUi();
+    else if(hasActiveEvent() && players.length && mode==='data' && !popupOpen && !isFormFieldFocused()) renderDataEntry();
     // Visible confirmation that an inbound change actually arrived from another
     // device (helps distinguish a sync problem from a rendering problem).
     if(refreshed>0){ try{ showToast('Synced update from another device'); }catch(e){} }
@@ -1009,6 +1058,7 @@ function setActiveEvent(i){
   const dtEl=document.getElementById('eventDate'); if(dtEl) dtEl.value=mdyToISO(eventDate);
   const nmEl=document.getElementById('eventName'); if(nmEl) nmEl.value=ev.name||'';
   ensureData(ev);
+  if(window.ActivitySync) window.ActivitySync.prime(ev);
   const todEl=document.getElementById('eventTod'); if(todEl) todEl.value=ev.data.tod||'Morning';
   renderSavedEvents(i);
   rememberActiveEvent();
@@ -1591,7 +1641,7 @@ function renderForm(){
       const wrap=document.createElement('div');wrap.className='field'+(isAuto?' calc':'');
       if(f.type==='bool'){
         const c=document.createElement('label');c.className='check';
-        const cb=document.createElement('input');cb.type='checkbox';cb.checked=!!p[f.idx];
+        const cb=document.createElement('input');cb.type='checkbox';cb.dataset.idx=f.idx;cb.checked=!!p[f.idx];
         cb.addEventListener('change',()=>{p[f.idx]=cb.checked; if(PITCHER_IDX!==undefined && f.idx===PITCHER_IDX){ if(cb.checked && POS){ p[POS.field]=''; applyPosition(p); refreshComputed(p,-1); const pf=document.querySelector('#form [data-idx="'+POS.field+'"]'); if(pf) pf.value=''; } updateFormVisibility(p); renderPlayers(); } validateAllDom(p); persistEvents(); });
         const sp=document.createElement('span');sp.textContent=(PITCHER_IDX!==undefined && f.idx===PITCHER_IDX)?'Is Pitcher?':labelize(f.name);
         c.appendChild(cb);c.appendChild(sp);wrap.appendChild(c);
@@ -3175,6 +3225,26 @@ function applyDbToRoster(){
 // Refresh the open form's field values from the current player objects WITHOUT
 // rebuilding it (which would drop focus/caret). Only fields the user is not
 // currently editing are touched.
+function patchActivityPills(){
+  var bar=document.getElementById('playerbar');if(!bar)return;
+  var pills=bar.querySelectorAll('.pill');
+  if(pills.length!==players.length){renderPlayers();return;}
+  pills.forEach(function(pill,i){
+    var p=players[i],label=pill.querySelector('span');
+    var text=String(p[NAME_IDX]||'')+(String(p[PIDCUBS_IDX]||'').trim()?(', '+p[PIDCUBS_IDX]):'');
+    if(label && label.textContent!==(text||('Player '+(i+1))))label.textContent=text||('Player '+(i+1));
+    pill.classList.toggle('active',i===current);
+  });
+}
+function syncActivityUi(){
+  var active=document.activeElement;
+  document.querySelectorAll('[data-live-activity]').forEach(function(node){
+    if(node===active||!node._liveActivityRead)return;
+    var value=String(node._liveActivityRead()||'');
+    if(node.classList.contains('segtabs'))node.querySelectorAll('.segtab').forEach(function(b){b.classList.toggle('active',b.textContent===value);});
+    else if(node.value!==value)node.value=value;
+  });
+}
 function syncFormValues(){
   var f=document.getElementById('form'); if(!f||!hasActiveEvent()) return;
   var p=players[current]; if(!p) return;
@@ -3676,7 +3746,7 @@ function applyPendingDefense(p){
   recalc(p);
   return true;
 }
-function openPlayerPopup(title, buildRow){
+function openPlayerPopup(title, buildRow, transaction){
   if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
   if(!players.length){ showToast('No players added yet'); return; }
   const root=document.createElement('div');
@@ -3708,7 +3778,7 @@ function openPlayerPopup(title, buildRow){
   function drawCard(p,i,withTitle){
     const card=document.createElement('div');card.className='rowcard';
     if(withTitle) card.appendChild(elItem('h4',{textContent:(playerName(p)||('Player '+(i+1)))+posSuffixText(p)}));
-    const rowNode=buildRow(p,i); if(rowNode) card.appendChild(rowNode);
+    const rowNode=buildRow(transaction?transaction.draft(p):p,i); if(rowNode) card.appendChild(rowNode);
     return card;
   }
   function renderList(){
@@ -3755,9 +3825,9 @@ function openPlayerPopup(title, buildRow){
   const acts=document.createElement('div');acts.style.cssText='display:flex;gap:10px;justify-content:flex-end;margin-top:16px';
   const finish=()=>{ _popupSearchClear=null; closeModal(); renderPlayers(); if(mode==='data') renderDataEntry(); else renderForm(); };
   const cancel=elItem('button',{className:'ghost',textContent:'Cancel'});
-  cancel.addEventListener('click',finish);
+  cancel.addEventListener('click',()=>{ if(transaction)transaction.cancel(); finish(); });
   const close=elItem('button',{className:'primary',textContent:'Done'});
-  close.addEventListener('click',finish);
+  close.addEventListener('click',()=>{ if(transaction){ var focused=document.activeElement; if(focused&&focused._commitsPlayerName)focused.blur(); transaction.save(); } finish(); });
   acts.appendChild(cancel);acts.appendChild(close);root.appendChild(acts);
   openModalNode(root);
 }
@@ -3951,22 +4021,34 @@ function openEditPlayersPopup(){
   // Same fields as the Profiles page editor: Name, ID, Position, Class, Bats, Throws.
   var POSN=['','P','C','1B','2B','3B','SS','IF','LF','CF','RF','OF','DH','UTIL'];
   var CLS=[''];for(var y=2016;y<=2037;y++)CLS.push(String(y));
+  var drafts=new Map(),originals=new Map();
+  var transaction={
+    draft:function(p){if(!drafts.has(p)){drafts.set(p,JSON.parse(JSON.stringify(p)));originals.set(p,JSON.parse(JSON.stringify(p)));}return drafts.get(p);},
+    cancel:function(){drafts.forEach(function(p){_playerNameEditors.delete(p);});drafts.clear();},
+    save:function(){
+      drafts.forEach(function(d,p){
+        var original=originals.get(p),fields=new Set(Object.keys(original).concat(Object.keys(d)));
+        fields.forEach(function(k){if(JSON.stringify(original[k])!==JSON.stringify(d[k]))p[k]=d[k];});
+        recalc(p);syncLinkedNames(p);scheduleDBSync(p);_playerNameEditors.delete(d);
+      });persistEvents();
+    }
+  };
   openPlayerPopup('Edit Players \u2013 profile', function(p){
     var wrap=document.createElement('div');
     var grid=document.createElement('div');grid.className='grid';
     // commit: persist locally AND push THIS player to the database (edits the same
     // profile doc; changing the ID removes the old doc so no duplicate is created).
-    var commit=function(){ persistEvents(); scheduleDBSync(p); };
+    var commit=function(){};
     // Name
-    grid.appendChild(deField('Name',(NAME_IDX!==undefined?p[NAME_IDX]:'')||'',function(v){ if(NAME_IDX!==undefined){ p[NAME_IDX]=v; handleChange(NAME_IDX,p); } commit(); },p));
+    grid.appendChild(deField('Name',(NAME_IDX!==undefined?p[NAME_IDX]:'')||'',function(v){ if(NAME_IDX!==undefined){ p[NAME_IDX]=v; } commit(); },p));
     // ID (Player ID Cubs)
-    grid.appendChild(deField('ID (Player ID Cubs)',(PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'',function(v){ if(PIDCUBS_IDX!==undefined){ p[PIDCUBS_IDX]=v; handleChange(PIDCUBS_IDX,p); } commit(); }));
+    grid.appendChild(deField('ID (Player ID Cubs)',(PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'',function(v){ if(PIDCUBS_IDX!==undefined){ p[PIDCUBS_IDX]=v; } commit(); }));
     // Position (P sets pitcher)
     var curPos=(PITCHER_IDX!==undefined&&p[PITCHER_IDX]===true)?'P':((POS&&p[POS.field])?String(p[POS.field]):'');
     grid.appendChild(deSelect('Position',POSN,curPos,function(v){
       if(v==='P'){ if(PITCHER_IDX!==undefined)p[PITCHER_IDX]=true; if(POS){ p[POS.field]=''; applyPosition(p); } }
-      else { if(PITCHER_IDX!==undefined)p[PITCHER_IDX]=false; if(POS){ p[POS.field]=v; handleChange(POS.field,p); } }
-      recalc(p); renderPlayers(); if(p===players[current]) renderForm(); commit();
+      else { if(PITCHER_IDX!==undefined)p[PITCHER_IDX]=false; if(POS){ p[POS.field]=v; } }
+      recalc(p); commit();
     }));
     // Class
     grid.appendChild(deSelect('Class',CLS,p._class||'',function(v){ p._class=v; commit(); }));
@@ -3979,7 +4061,7 @@ function openEditPlayersPopup(){
     wrap.appendChild(deSeg('Bats',['R','L'],p._bats||'',function(v){ p._bats=v; commit(); }));
     wrap.appendChild(deSeg('Throws',['R','L'],p._throws||'',function(v){ p._throws=v; commit(); }));
     return wrap;
-  });
+  },transaction);
 }
 function mergePlayersConfirm(selectedPlayers){
   var POSN=['','P','C','1B','2B','3B','SS','IF','LF','CF','RF','OF','DH','UTIL'];
@@ -4180,10 +4262,11 @@ function applyDedupGroups(groups){
   try{ scheduleEventDbSync(true); }catch(e){}
   showToast('Deduped '+removed+' duplicate player'+(removed!==1?'s':''));
 }
-function deField(label,val,onIn,namePlayer){
+function deField(label,val,onIn,namePlayer,liveRead){
   const w=document.createElement('div');w.className='field';
   const lb=document.createElement('label');lb.textContent=label;
   const inp=document.createElement('input');inp.type='text';inp.value=val||'';
+  if(liveRead){inp.dataset.liveActivity='1';inp._liveActivityRead=liveRead;inp.addEventListener('blur',function(){inp.value=String(liveRead()||'');});}
   if(namePlayer) bindPlayerNameCommit(inp,namePlayer,onIn);
   else inp.addEventListener('input',()=>onIn(inp.value));
   w.appendChild(lb);w.appendChild(inp);return w;
@@ -4202,14 +4285,16 @@ function deFieldRO(label,val,ph){
   const inp=document.createElement('input');inp.type='text';inp.readOnly=true;inp.value=val||'';inp.placeholder=ph||'';
   w.appendChild(lb);w.appendChild(inp);return w;
 }
-function deSeg(label,opts,val,onPick){
+function deSeg(label,opts,val,onPick,liveRead){
   const g=document.createElement('div');g.className='seg-group';
   const l=document.createElement('div');l.className='lbl';l.textContent=label;g.appendChild(l);
   const row=document.createElement('div');row.className='segtabs';
   let cur=val;
+  if(liveRead){row.dataset.liveActivity='1';row._liveActivityRead=liveRead;}
   opts.forEach(o=>{
     const b=document.createElement('div');b.className='segtab'+(cur===o?' active':'');b.textContent=o;
     b.addEventListener('click',()=>{
+      if(liveRead)cur=liveRead();
       cur=(cur===o)?'':o; onPick(cur);
       row.querySelectorAll('.segtab').forEach(x=>x.classList.toggle('active', x.textContent===cur));
     });
@@ -4225,6 +4310,7 @@ function renderMapIds(data){
     const lb=document.createElement('label');lb.textContent=label;lb.style.cssText='display:block;font-size:12px;color:var(--muted);font-weight:600;margin:0 0 4px 2px';
     const inp=document.createElement('input');inp.type='text';inp.value=data.ids[k]||'';
     inp.style.cssText='width:100%;background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:8px 10px;font-size:13px';
+    inp.dataset.liveActivity='1';inp._liveActivityRead=function(){return data.ids[k];};
     inp.addEventListener('input',()=>{
       const old=data.ids[k];
       data.ids[k]=inp.value;
@@ -4330,15 +4416,15 @@ function devPlayerCard(dev,dp,i,data,arr){
   card.appendChild(head);
   const body=document.createElement('div');body.className='body';
   const grid=document.createElement('div');grid.className='grid';
-  grid.appendChild(deField('Player ID Cubs',dp.cubsId,function(v){dp.cubsId=v;persistEvents();}));
-  grid.appendChild(deField('Device ID',dp.id,function(v){dp.id=v;persistEvents();}));
-  grid.appendChild(deField('Account Name',dp.accountName,function(v){dp.accountName=v;persistEvents();}));
-  grid.appendChild(deField('Account Number',dp.accountNumber,function(v){dp.accountNumber=v;persistEvents();}));
-  grid.appendChild(deField('Agent',dp.agent,function(v){dp.agent=v;persistEvents();}));
+  grid.appendChild(deField('Player ID Cubs',dp.cubsId,function(v){dp.cubsId=v;persistEvents();},null,function(){return dp.cubsId;}));
+  grid.appendChild(deField('Device ID',dp.id,function(v){dp.id=v;persistEvents();},null,function(){return dp.id;}));
+  grid.appendChild(deField('Account Name',dp.accountName,function(v){dp.accountName=v;persistEvents();},null,function(){return dp.accountName;}));
+  grid.appendChild(deField('Account Number',dp.accountNumber,function(v){dp.accountNumber=v;persistEvents();},null,function(){return dp.accountNumber;}));
+  grid.appendChild(deField('Agent',dp.agent,function(v){dp.agent=v;persistEvents();},null,function(){return dp.agent;}));
   body.appendChild(grid);
-  body.appendChild(deSeg('Bats',['R','L'],dp.bats,function(v){dp.bats=v;persistEvents();}));
-  body.appendChild(deSeg('Throws',['R','L'],dp.throws,function(v){dp.throws=v;persistEvents();}));
-  body.appendChild(deSeg('Time of Day',['Morning','Afternoon','Evening'],dp.tod,function(v){dp.tod=v;persistEvents();}));
+  body.appendChild(deSeg('Bats',['R','L'],dp.bats,function(v){dp.bats=v;persistEvents();},function(){return dp.bats;}));
+  body.appendChild(deSeg('Throws',['R','L'],dp.throws,function(v){dp.throws=v;persistEvents();},function(){return dp.throws;}));
+  body.appendChild(deSeg('Time of Day',['Morning','Afternoon','Evening'],dp.tod,function(v){dp.tod=v;persistEvents();},function(){return dp.tod;}));
   const del=document.createElement('button');del.className='ghost';del.textContent='Remove player';del.style.marginTop='14px';
   del.addEventListener('click',()=>{ arr.splice(i,1); persistEvents(); renderDevAccordion(data); });
   body.appendChild(del);
