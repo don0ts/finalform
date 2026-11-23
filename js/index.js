@@ -220,7 +220,7 @@ function _devSig(data){
 function _eventSig(ev){
   if(!ev) return '';
   try{
-    return JSON.stringify([String(ev.name||''),String(ev.date||''),ev.players||[],_devSig(ev.data)]);
+    return JSON.stringify([String(ev.name||''),String(ev.date||''),ev.players||[],_devSig(ev.data),ev._removedPlayers||[]]);
   }catch(e){ return String(Date.now()); }
 }
 var _evPushStart=0;
@@ -844,6 +844,7 @@ function applyDbEvents(list, snap, opts){
     var hasPayload=!!(parsed&&typeof parsed==='object'&&(parsed.players!==undefined||parsed.name!==undefined||parsed.date!==undefined));
     var incoming=(parsed&&typeof parsed==='object')?parsed:{name:docu.name||'',date:docu.date||'',players:[]};
     if(!Array.isArray(incoming.players)) incoming.players=[];
+    if((incoming._removedPlayers||[]).length) incoming=_filterRemovedRoster(incoming,incoming._removedPlayers);
     if(idx<0){
       // Brand-new event from another device -> add it. But if this id was just
       // merged/deleted here, skip it so a delete that is still propagating can't
@@ -860,6 +861,9 @@ function applyDbEvents(list, snap, opts){
     var isActive=(activeIdx===idx);
     // Keep remote updates queued, not lost, while the active name is a draft.
     if(isActive && _playerNameEditors.size){ _nameDeferredEvents[String(id)]=docu; return; }
+    var _rosterRemovals=_combineRosterRemovals([ev,incoming]);
+    var _rosterMetaChanged=JSON.stringify(ev._removedPlayers||[])!==JSON.stringify(_rosterRemovals);
+    if(_rosterRemovals.length) incoming=_filterRemovedRoster(incoming,_rosterRemovals);
     // Don't let a copy that is OLDER (or the same age) than our local edits win.
     // This replaces the old blanket timer: an edit made here is stamped locally,
     // so an echo of an earlier save can never roll it back (Blast 2 -> 10 stays 10).
@@ -868,8 +872,8 @@ function applyDbEvents(list, snap, opts){
     var pushed=_getPushedStamp(id); var pushedMs=Date.parse(pushed||'')||0;
     // A stale echo of an earlier save: keep the local value and make sure the
     // newer version reaches the database instead of being visually rolled back.
-    if(staleOwned && events[activeIdx]===ev && myStamp>incStamp){ scheduleEventDbSync(true); return; }
-    if(incStamp && myStamp && incStamp<=myStamp){
+    if(!_rosterMetaChanged && staleOwned && events[activeIdx]===ev && myStamp>incStamp){ scheduleEventDbSync(true); return; }
+    if(!_rosterMetaChanged && incStamp && myStamp && incStamp<=myStamp){
       // Our local state is newer than what the database holds: keep it, and make
       // sure the newer version actually gets written -- for THIS event, whether or
       // not it is the one on screen right now. A live push that failed used to be
@@ -890,7 +894,7 @@ function applyDbEvents(list, snap, opts){
     // player rosters are deduped by Cubs ID / name, and device/tech entries are
     // unioned. Event name/date follow the incoming (latest) save.
     var incEv={ name:(incoming.name||''), date:(incoming.date||''), players:incoming.players,
-                data:(incoming.data!==undefined?incoming.data:ev.data) };
+                data:(incoming.data!==undefined?incoming.data:ev.data), _removedPlayers:_rosterRemovals };
     var merged=computeMergedEvent([ev, incEv], true);
     _adoptIncomingRowValues(merged, ev, incoming, incEv);
     // Preserve a Time of Day set on the other device if we don't have one locally.
@@ -900,6 +904,7 @@ function applyDbEvents(list, snap, opts){
     var before=JSON.stringify({n:ev.name||'',d:ev.date||'',p:ev.players||[],x:_devSig(ev.data)});
     var after=JSON.stringify({n:newName,d:newDate,p:merged.players,x:_devSig(merged.data)});
     var todDiff=String((merged.data&&merged.data.tod)||'')!==String((ev.data&&ev.data.tod)||'');
+    if(_rosterMetaChanged){ ev._removedPlayers=_rosterRemovals; changed=true; }
     if(before===after && !todDiff) return; // nothing new for this event
     ev.name=newName; ev.date=newDate; ev.players=merged.players;
     if(incStamp) ev._localStamp=Math.max(_evLocalStamp(ev)||0, incStamp);
@@ -1054,6 +1059,7 @@ function createEvent(){
 function addPlayer(){
   if(!hasActiveEvent()){ showToast('Create or select an event first'); return; }
   const p=blankPlayer(); if(EVENT_IDX>=0)p[EVENT_IDX]=eventDate;
+  _recordRosterAddition(events[activeIdx],p);
   players.push(p); current=players.length-1;
   try{ clearPlayerSearch(); }catch(e){}
   persistEvents(); renderSavedEvents(activeIdx); updateGate();
@@ -1305,6 +1311,7 @@ function addPlayerFull(opt){
   p._class=opt.cls||'';
   p._dob=opt.dob||'';
   p._agent=opt.agent||'';
+  _recordRosterAddition(events[activeIdx],p);
   players.push(p); current=players.length-1;
   persistEvents(); renderSavedEvents(activeIdx); updateGate();
   renderPlayers(); renderForm();
@@ -1424,6 +1431,7 @@ function confirmDeletePlayer(i){
   document.getElementById('mDelCancel').addEventListener('click',closeModal);
   document.getElementById('mDelOk').addEventListener('click',()=>{
     const _goneId=players[i]&&players[i]._pid;
+    _recordRosterRemoval(events[activeIdx],players[i]);
     removeDeviceLinksFor(players[i]); players.splice(i,1);
     // note: intentionally NOT removed from Firestore – deleted players stay in the database
     if(current>=players.length)current=players.length-1;
@@ -2156,8 +2164,66 @@ function _aliasMergeKeys(){
   }
   return {idByName:idByName, nameById:nameById};
 }
+// Event-scoped removal records distinguish a deletion from an incomplete copy.
+// Profiles remain in Players; only this event's roster/device rows are filtered.
+function _rosterIdentity(p){
+  return {id:String((PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'').trim(),
+    pid:String(p._pid||''),name:_fold(p[NAME_IDX]||'')};
+}
+function _rosterSame(a,b){
+  if(a.pid && b.pid && a.pid===b.pid) return true;
+  if(a.id && b.id) return a.id===b.id;
+  return !!(a.name && b.name && a.name===b.name);
+}
+function _recordRosterAddition(ev,p){
+  var latest=0;
+  ((ev&&ev._removedPlayers)||[]).forEach(function(r){latest=Math.max(latest,Number(r.at)||0);});
+  p._rosterAddedAt=Math.max(Date.now(),latest+1);
+}
+function _recordRosterRemoval(ev,p){
+  if(!ev||!p) return;
+  var r=_rosterIdentity(p); r.at=Math.max(Date.now(),Number(p._rosterAddedAt||0)+1);
+  var list=(ev._removedPlayers||[]).slice();
+  list=list.filter(function(old){return !_rosterSame(old,r);});
+  list.push(r); ev._removedPlayers=list;
+}
+function _combineRosterRemovals(copies){
+  var byKey={};
+  (copies||[]).forEach(function(ev){
+    (ev._removedPlayers||[]).forEach(function(r){
+      var key=JSON.stringify([r.id||'',r.pid||'',r.name||'']);
+      if(!byKey[key] || Number(r.at)>Number(byKey[key].at)) byKey[key]=r;
+    });
+  });
+  return Object.keys(byKey).sort().map(function(k){return byKey[k];});
+}
+function _filterRemovedRoster(ev,removed){
+  if(!removed.length) return ev;
+  var out=Object.assign({},ev), dropped=[];
+  out.players=(ev.players||[]).filter(function(p){
+    var identity=_rosterIdentity(p);
+    var gone=removed.some(function(r){return _rosterSame(r,identity) && Number(r.at||0)>=Number(p._rosterAddedAt||0);});
+    if(gone) dropped.push(identity);
+    return !gone;
+  });
+  // Drop linked rows too, including foreign-device identities, not just _pid.
+  if(ev.data && ev.data.devices){
+    out.data=Object.assign({},ev.data);out.data.devices={};
+    Object.keys(ev.data.devices).forEach(function(k){
+      var d=ev.data.devices[k]; out.data.devices[k]=Object.assign({},d);
+      out.data.devices[k].players=(d.players||[]).filter(function(row){
+        var identity={id:String(row.cubsId||'').trim(),pid:String(row.linkPid||''),name:_fold(row.name||'')};
+        return !dropped.some(function(r){return _rosterSame(r,identity);});
+      });
+    });
+  }
+  out._removedPlayers=removed;
+  return out;
+}
 function computeMergedEvent(selected, sameEvent){
   if(sameEvent===undefined) sameEvent=false;
+  var rosterRemovals=sameEvent?_combineRosterRemovals(selected):[];
+  if(rosterRemovals.length) selected=selected.map(function(ev){return _filterRemovedRoster(ev,rosterRemovals);});
   // When sameEvent is false (merging DISTINCT events), players are deduped only
   // WITHIN each source event — the same name appearing in two different events
   // is kept as separate rows (no cross-event name/ID aliasing). When sameEvent
@@ -2357,7 +2423,9 @@ function computeMergedEvent(selected, sameEvent){
   // lookup. IDs come only from the events themselves (a blank-id duplicate
   // adopts a same-name, same-event player's id via _canonKey above).
   mergedPlayers.forEach(function(mp){ delete mp.__ei; });
-  return { name:(primary.name||pick('name'))||'', date:(primary.date||pick('date'))||'', players:mergedPlayers, data:mergedData };
+  var result={ name:(primary.name||pick('name'))||'', date:(primary.date||pick('date'))||'', players:mergedPlayers, data:mergedData };
+  if(rosterRemovals.length) result._removedPlayers=rosterRemovals;
+  return result;
 }
 function eventLabel(ev){
   var n=ev.players?ev.players.length:0;
@@ -2767,6 +2835,7 @@ function _evContentSig(ev){
   var ids=(ev.data&&ev.data.ids)||{};
   parts.push('I'+Object.keys(ids).sort().map(function(k){ return k+'='+String(ids[k]); }).join('\u0001'));
   parts.push('T'+String((ev.data&&ev.data.tod)||''));
+  if((ev._removedPlayers||[]).length) parts.push('R'+JSON.stringify(ev._removedPlayers));
   return parts.join('\u0003');
 }
 // How MUCH information an event carries (non-blank cells + device rows). Used to
