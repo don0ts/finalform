@@ -858,6 +858,8 @@ function applyDbEvents(list, snap, opts){
     if(!hasPayload) return;
     var ev=events[idx];
     var isActive=(activeIdx===idx);
+    // Keep remote updates queued, not lost, while the active name is a draft.
+    if(isActive && _playerNameEditors.size){ _nameDeferredEvents[String(id)]=docu; return; }
     // Don't let a copy that is OLDER (or the same age) than our local edits win.
     // This replaces the old blanket timer: an edit made here is stamped locally,
     // so an echo of an earlier save can never roll it back (Blast 2 -> 10 stays 10).
@@ -938,7 +940,7 @@ function applyDbEvents(list, snap, opts){
     var pev=events[pdi];
     if(!pev._dbId || incomingIds[pev._dbId]) continue;
     var pActive=(activeIdx===pdi);
-    if(pActive && (popupOpen || isFormFieldFocused())) continue;
+    if(pActive && (popupOpen || isFormFieldFocused() || _playerNameEditors.size)) continue;
     events.splice(pdi,1);
     changed=true;
     if(pActive){
@@ -1057,7 +1059,7 @@ function addPlayer(){
   persistEvents(); renderSavedEvents(activeIdx); updateGate();
   renderPlayers(); renderForm();
 }
-function closeModal(){ const ov=document.getElementById('overlay'); if(ov){ ov.classList.remove('show'); const md=document.getElementById('modal'); if(md) md.innerHTML=''; } }
+function closeModal(){ var a=document.activeElement; if(a&&a._commitsPlayerName) a.blur(); const ov=document.getElementById('overlay'); if(ov){ ov.classList.remove('show'); const md=document.getElementById('modal'); if(md) md.innerHTML=''; } }
 function openModal(html){ const ov=document.getElementById('overlay'), md=document.getElementById('modal'); if(!ov||!md) return; md.innerHTML=html; ov.classList.add('show'); }
 function openModalNode(node){ const ov=document.getElementById('overlay'), md=document.getElementById('modal'); if(!ov||!md) return; md.innerHTML=''; md.appendChild(node); ov.classList.add('show'); }
 function elItem(tag,props,style){ const e=document.createElement(tag); if(props) Object.keys(props).forEach(k=>{ e[k]=props[k]; }); if(style) e.style.cssText=style; return e; }
@@ -1531,6 +1533,28 @@ function updateFootInfo(){
   const fi=document.getElementById('footInfo'); if(fi) fi.textContent=evName+players.length+' player'+(players.length!==1?'s':'')+' \u2022 exports '+NCOL+' columns per row';
 }
 
+// Player names are drafts until blur/Enter. Never publish partial identities.
+var _playerNameEditors=new Set();
+var _nameDeferredEvents={};
+function bindPlayerNameCommit(input,p,onCommit){
+  input._commitsPlayerName=true;
+  input.addEventListener('focus',function(){ _playerNameEditors.add(p); });
+  input.addEventListener('input',function(){ _playerNameEditors.add(p); });
+  function finish(){
+    var value=titleCaseStr(input.value||''); input.value=value;
+    _playerNameEditors.delete(p);
+    if(String(p[NAME_IDX]||'')!==value) onCommit(value);
+    if(!_playerNameEditors.size){
+      var pending=Object.keys(_nameDeferredEvents).map(function(k){return _nameDeferredEvents[k];});
+      _nameDeferredEvents={};
+      if(pending.length) applyDbEvents(pending,null,{partial:true});
+    }
+  }
+  input.addEventListener('blur',finish);
+  input.addEventListener('keydown',function(e){
+    if(e.key==='Enter' && !e.isComposing){ e.preventDefault(); e.stopPropagation(); input.blur(); }
+  });
+}
 function renderForm(){
   renderDevLinks();
   const root=document.getElementById('form');root.innerHTML='';
@@ -1579,7 +1603,8 @@ function renderForm(){
           const inp=document.createElement('input');
           inp.type='text';inp.setAttribute('list','dl_'+f.idx);inp.placeholder='select or type';
           inp.value=p[f.idx]||'';inp.dataset.idx=f.idx;
-          inp.addEventListener('input',()=>{p[f.idx]=inp.value;handleChange(f.idx,p);});
+          if(f.idx===NAME_IDX) bindPlayerNameCommit(inp,p,function(v){p[f.idx]=v;handleChange(f.idx,p);});
+          else inp.addEventListener('input',()=>{p[f.idx]=inp.value;handleChange(f.idx,p);});
           const dl=document.createElement('datalist');dl.id='dl_'+f.idx;
           f.dd.options.forEach(o=>{const op=document.createElement('option');op.value=o;dl.appendChild(op);});
           wrap.appendChild(inp);wrap.appendChild(dl);
@@ -1597,6 +1622,7 @@ function renderForm(){
         }
         inp.dataset.idx=f.idx;
         if(isAuto){inp.readOnly=true;inp.placeholder='auto';}
+        else if(f.idx===NAME_IDX) bindPlayerNameCommit(inp,p,function(v){p[f.idx]=v;handleChange(f.idx,p);});
         else inp.addEventListener('input',()=>{
           let val=inp.value;
           if(f.type==='date_mdy'){ val=isoToMDY(val); }
@@ -2997,6 +3023,7 @@ function applyDbToRoster(){
     if(!playerName(p) && !(PIDCUBS_IDX!==undefined && String(p[PIDCUBS_IDX]||'').trim())) return;
     var id=String(dbDocId(p)); var d=byId[id]; if(!d) return;
     // Leave the currently-selected player alone while its form field is focused.
+    if(_playerNameEditors.has(p)){ matchedDocIds[id]=true; return; }
     if(players[current]===p && isFormFieldFocused()) return;
     if(patchProfileFromDoc(p,d)){ changed=true; p._syncId=id; if(players[current]===p) curChanged=true; }
     matchedDocIds[id]=true;
@@ -3008,7 +3035,7 @@ function applyDbToRoster(){
   //   (b) ID added for the first time in Profiles: local player still matches
   //       via _pid, DB doc is under the new real ID.
   players.forEach(function(p){
-    if(!playerName(p)) return;
+    if(!playerName(p) || _playerNameEditors.has(p)) return;
     // If this player was already matched in pass 1, skip.
     if(matchedDocIds[String(dbDocId(p))]) return;
     // Try matching via previous sync ID or _pid
@@ -3051,7 +3078,7 @@ function applyDbToRoster(){
       var pName=_fold(unmatchedPlayers[i][NAME_IDX]);
       if(pName===dName){ matchP=unmatchedPlayers[i]; break; }
     }
-    if(!matchP) return;
+    if(!matchP || _playerNameEditors.has(matchP)) return;
     if(players[current]===matchP && isFormFieldFocused()) return;
     var newId=String(d.player_id||d._id||'');
     if(PIDCUBS_IDX!==undefined && newId && String(matchP[PIDCUBS_IDX]||'')!==newId){
@@ -3862,7 +3889,7 @@ function openEditPlayersPopup(){
     // profile doc; changing the ID removes the old doc so no duplicate is created).
     var commit=function(){ persistEvents(); scheduleDBSync(p); };
     // Name
-    grid.appendChild(deField('Name',(NAME_IDX!==undefined?p[NAME_IDX]:'')||'',function(v){ if(NAME_IDX!==undefined){ p[NAME_IDX]=v; handleChange(NAME_IDX,p); } commit(); }));
+    grid.appendChild(deField('Name',(NAME_IDX!==undefined?p[NAME_IDX]:'')||'',function(v){ if(NAME_IDX!==undefined){ p[NAME_IDX]=v; handleChange(NAME_IDX,p); } commit(); },p));
     // ID (Player ID Cubs)
     grid.appendChild(deField('ID (Player ID Cubs)',(PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'',function(v){ if(PIDCUBS_IDX!==undefined){ p[PIDCUBS_IDX]=v; handleChange(PIDCUBS_IDX,p); } commit(); }));
     // Position (P sets pitcher)
@@ -4084,11 +4111,12 @@ function applyDedupGroups(groups){
   try{ scheduleEventDbSync(true); }catch(e){}
   showToast('Deduped '+removed+' duplicate player'+(removed!==1?'s':''));
 }
-function deField(label,val,onIn){
+function deField(label,val,onIn,namePlayer){
   const w=document.createElement('div');w.className='field';
   const lb=document.createElement('label');lb.textContent=label;
   const inp=document.createElement('input');inp.type='text';inp.value=val||'';
-  inp.addEventListener('input',()=>onIn(inp.value));
+  if(namePlayer) bindPlayerNameCommit(inp,namePlayer,onIn);
+  else inp.addEventListener('input',()=>onIn(inp.value));
   w.appendChild(lb);w.appendChild(inp);return w;
 }
 function deDate(label,val,onIn){
