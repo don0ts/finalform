@@ -1036,6 +1036,7 @@ function applyDbEvents(list, snap, opts){
       if(_real){ _evSwept=true; _evSweepLocal(); }
     }catch(e){}
   }
+  if(typeof _cdb==='function'&&_cdb()&&typeof syncRosterIdsFromDb==='function')syncRosterIdsFromDb();
 }
 if(typeof window!=='undefined') window.__applyDbEvents=applyDbEvents;
 function updateGate(){
@@ -1068,6 +1069,7 @@ function setActiveEvent(i){
   renderPlayers();
   renderForm();
   renderDataEntry();
+  if(typeof _cdb==='function'&&_cdb()&&typeof syncRosterIdsFromDb==='function')syncRosterIdsFromDb();
 }
 function createEvent(){
   openModal(
@@ -1117,14 +1119,14 @@ function addPlayer(){
   persistEvents(); renderSavedEvents(activeIdx); updateGate();
   renderPlayers(); renderForm();
 }
-function closeModal(){ var a=document.activeElement; if(a&&a._commitsPlayerName) a.blur(); const ov=document.getElementById('overlay'); if(ov){ ov.classList.remove('show'); const md=document.getElementById('modal'); if(md) md.innerHTML=''; } }
+function closeModal(){ var a=document.activeElement; if(a&&a._commitsPlayerName) a.blur(); const ov=document.getElementById('overlay'); if(ov){ ov.classList.remove('show'); const md=document.getElementById('modal'); if(md) md.innerHTML=''; } queueRosterIdRefresh(); }
 function openModal(html){ const ov=document.getElementById('overlay'), md=document.getElementById('modal'); if(!ov||!md) return; md.innerHTML=html; ov.classList.add('show'); }
 function openModalNode(node){ const ov=document.getElementById('overlay'), md=document.getElementById('modal'); if(!ov||!md) return; md.innerHTML=''; md.appendChild(node); ov.classList.add('show'); }
 function elItem(tag,props,style){ const e=document.createElement(tag); if(props) Object.keys(props).forEach(k=>{ e[k]=props[k]; }); if(style) e.style.cssText=style; return e; }
 function fieldLabel(t){ return elItem('label',{textContent:t},'display:block;font-size:12px;color:var(--muted);font-weight:600;margin:0 0 6px 2px'); }
 function txtInput(val){ const i=document.createElement('input');i.type='text';i.value=val||'';i.style.cssText='width:100%;box-sizing:border-box;background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:8px 10px;font-size:13px';return i; }
 function openModal2Node(node){ const ov=document.getElementById('overlay2'), md=document.getElementById('modal2'); if(!ov||!md) return; md.innerHTML=''; md.appendChild(node); ov.classList.add('show'); }
-function closeModal2(){ const ov=document.getElementById('overlay2'); if(ov){ ov.classList.remove('show'); const md=document.getElementById('modal2'); if(md) md.innerHTML=''; } }
+function closeModal2(){ const ov=document.getElementById('overlay2'); if(ov){ ov.classList.remove('show'); const md=document.getElementById('modal2'); if(md) md.innerHTML=''; } queueRosterIdRefresh(); }
 function fRange(a,b,step){ const out=[]; const A=Math.round(a*100),B=Math.round(b*100),S=Math.round(step*100); for(var c=A;c<=B;c+=S) out.push(c/100); return out; }
 function fmt2(n){ return Number(n).toFixed(2); }
 const YARD_OPTS={ '10':fRange(1.40,1.90,0.10), '20':fRange(2.50,3.50,0.10), '30':fRange(3.50,4.40,0.10), '40':fRange(4.30,5.80,0.10), '60':fRange(6.20,9.00,0.10) };
@@ -3030,6 +3032,9 @@ function _pruneBlankDoc(obj){
 // no-ID document is removed so it doesn't linger as a duplicate.
 function dbDocId(p){
   const cubs=((PIDCUBS_IDX!==undefined?p[PIDCUBS_IDX]:'')||'').toString().trim();
+  // A database-side field update need not rename the document. Keep its real
+  // identity until the user deliberately edits the ID locally.
+  if(p._profileDocId && String(p._profileId||'')===cubs)return String(p._profileDocId);
   return cubs || ensurePid(p);   // real ID when present, else the local fallback id
 }
 // Profile writes are collected here for one short moment and then sent together:
@@ -3056,6 +3061,7 @@ function _dbFlush(){
   Object.keys(_dbDirty).forEach(function(k){
     var job=_dbDirty[k]; delete _dbDirty[k];
     var p=job&&job.p; if(!p||!playerName(p)) return;
+    job.id=String(dbDocId(p));
     var data;
     try{ data=_pruneBlankDoc(playerToDoc(p)); }catch(e){ return; }
     var sig=_dbPayloadSig(job.id,data);
@@ -3111,7 +3117,7 @@ function isFormFieldFocused(){
   var f=document.getElementById('form'); return !!(f&&f.contains(a));
 }
 function patchProfileFromDoc(p,d){
-  var ch=false;
+  var ch=patchDatabasePlayerId(p,d);
   if(NAME_IDX!==undefined){ var nn=(d.player_name||''); if(String(p[NAME_IDX]||'')!==String(nn)){ p[NAME_IDX]=nn; ch=true; } }
   // Position / pitcher (mirror the same rules the editors use)
   var wantP=(d.position==='P');
@@ -3130,8 +3136,75 @@ function patchProfileFromDoc(p,d){
   if(String(p._agent||'')!==String(d.agent||d.agents||'')){ p._agent=d.agent||d.agents||''; ch=true; }
   return ch;
 }
+// ID reconciliation edits existing objects only: never add/remove a pill.
+function patchDatabasePlayerId(p,d){
+  var id=String(d.player_id!=null&&String(d.player_id).trim()?d.player_id:(d._id||'')).trim();
+  if(PIDCUBS_IDX===undefined || !id)return false;
+  var changed=String(p[PIDCUBS_IDX]||'')!==id;
+  if(changed)p[PIDCUBS_IDX]=id;
+  if(d._id){
+    if(p._profileDocId!==String(d._id)||p._profileId!==id)changed=true;
+    p._profileDocId=String(d._id);p._profileId=id;p._syncId=String(d._id);
+  }
+  return changed;
+}
+var _deferredRosterIds=new WeakMap(),_hasDeferredRosterIds=false;
+function queueRosterIdRefresh(){
+  if(!_hasDeferredRosterIds)return;
+  setTimeout(function(){syncRosterIdsFromDb();},0);
+}
+function syncRosterIdsFromDb(){
+  var db=_cdb();if(!db)return;
+  var docs=db.players()||[],byId={},byName={},touched=[];
+  _hasDeferredRosterIds=false;
+  docs.forEach(function(d){byId[String(d._id)]=d;var name=String(d.player_name||'');(byName[name]||(byName[name]=[])).push(d);});
+  var ov=document.getElementById('overlay'),ov2=document.getElementById('overlay2');
+  var modal=(ov&&ov.classList.contains('show'))||(ov2&&ov2.classList.contains('show'));
+  events.forEach(function(ev,ei){
+    var changed=false,isActive=ei===activeIdx;
+    (ev.players||[]).forEach(function(p){
+      if(_playerNameEditors.has(p)|| (isActive&&(modal||(players[current]===p&&isFormFieldFocused())))){
+        if(!_deferredRosterIds.has(p))_deferredRosterIds.set(p,String(p[PIDCUBS_IDX]||''));
+        _hasDeferredRosterIds=true;return;
+      }
+      if(_deferredRosterIds.has(p)){
+        var prior=_deferredRosterIds.get(p);_deferredRosterIds.delete(p);
+        // A locally edited ID is intentional, not an old database display.
+        if(prior!==String(p[PIDCUBS_IDX]||''))return;
+      }
+      // Let an intentional local ID edit finish its existing save path.
+      if(p._profileDocId&&String(p._profileId||'')!==String(p[PIDCUBS_IDX]||'')&&!byId[String(dbDocId(p))])return;
+      var keys=(p._profileDocId&&String(p._profileId||'')!==String(p[PIDCUBS_IDX]||''))?[dbDocId(p)]:[p._profileDocId,p._syncId,p._pid,p[PIDCUBS_IDX]],doc=null;
+      for(var i=0;i<keys.length;i++){if(keys[i]&&byId[String(keys[i])]){doc=byId[String(keys[i])];break;}}
+      if(!doc){var names=byName[String(p[NAME_IDX]||'')]||[];if(names.length===1)doc=names[0];}
+      if(!doc)return;
+      var oldId=String(p[PIDCUBS_IDX]||'');
+      if(patchDatabasePlayerId(p,doc)){
+        changed=true;
+        // Only existing, explicitly linked technology rows are updated.
+        Object.keys((ev.data&&ev.data.devices)||{}).forEach(function(dk){
+          (ev.data.devices[dk].players||[]).forEach(function(row){
+            if(row.linkPid&&row.linkPid===p._pid&&String(row.cubsId||'')===oldId)row.cubsId=p[PIDCUBS_IDX];
+          });
+        });
+      }
+    });
+    if(changed){
+      if(window.ActivitySync)window.ActivitySync.capture(ev);
+      _evMarkLocal(ev);_queueEventUpload(ev);touched.push(ei);
+    }
+  });
+  if(!touched.length)return;
+  try{localStorage.setItem(EVENTS_KEY,JSON.stringify(events));}catch(e){}
+  try{_scheduleEvFlush(1200);}catch(e){}
+  if(touched.indexOf(activeIdx)>=0){
+    patchActivityPills();syncFormValues();
+    if(mode==='data'&&!modal&&!isFormFieldFocused())renderDataEntry();
+  }
+}
 function applyDbToRoster(){
   if(!_cdb()) return;
+  syncRosterIdsFromDb();
   if(!hasActiveEvent() || !Array.isArray(players) || !players.length) return;
   // Don't fight the user while a popup editor (Edit Players / Tech) is open.
   var ov=document.getElementById('overlay'), ov2=document.getElementById('overlay2');
@@ -3158,6 +3231,7 @@ function applyDbToRoster(){
   //       via _pid, DB doc is under the new real ID.
   players.forEach(function(p){
     if(!playerName(p) || _playerNameEditors.has(p)) return;
+    if(p._profileDocId&&String(p._profileId||'')!==String(p[PIDCUBS_IDX]||'')&&!byId[String(dbDocId(p))])return;
     // If this player was already matched in pass 1, skip.
     if(matchedDocIds[String(dbDocId(p))]) return;
     // Try matching via previous sync ID or _pid
@@ -3188,6 +3262,7 @@ function applyDbToRoster(){
   // case-insensitive player_name.
   var unmatchedPlayers=players.filter(function(p){
     if(!playerName(p)) return false;
+    if(p._profileDocId&&String(p._profileId||'')!==String(p[PIDCUBS_IDX]||'')&&!byId[String(dbDocId(p))])return false;
     if(matchedDocIds[String(dbDocId(p))]) return false;
     return true;
   });
@@ -3195,6 +3270,7 @@ function applyDbToRoster(){
   unmatchedDocs.forEach(function(d){
     var dName=_fold(d.player_name);
     if(!dName) return;
+    if(docs.filter(function(x){return _fold(x.player_name)===dName;}).length!==1)return;
     var matchP=null;
     for(var i=0;i<unmatchedPlayers.length;i++){
       var pName=_fold(unmatchedPlayers[i][NAME_IDX]);
@@ -4586,6 +4662,7 @@ if(typeof document!=='undefined' && document.addEventListener){
     var ty=(t.type||'text'); if(ty!=='text') return;
     var v=t.value; if(v && v.charAt(0)!==v.charAt(0).toUpperCase()){ var pos=t.selectionStart; t.value=v.charAt(0).toUpperCase()+v.slice(1); try{t.setSelectionRange(pos,pos);}catch(_){} }
   },true);
+  document.addEventListener('focusout',function(){queueRosterIdRefresh();},true);
   // when a text field loses focus ("done typing"), title-case every word
   document.addEventListener('focusout',function(e){
     var t=e.target; if(!t||t.tagName!=='INPUT') return;
