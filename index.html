@@ -47,7 +47,8 @@
 </div>
 </div>
 
-<div class="wrap">
+<div class="wrap" inert>
+  <div id="localSaveState" role="status" style="margin-bottom:10px">Loading saved work on this device…</div>
   <div style="margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">Event date
       <input type="date" id="eventDate" style="background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:7px 10px;font-size:13px;width:150px;color-scheme:dark" />
@@ -121,6 +122,7 @@
 <div class="overlay" id="overlay2" style="z-index:60"><div class="modal" id="modal2" style="max-width:560px"></div></div>
 
 <script src="js/activity-sync.js"></script>
+<script src="js/local-edits.js"></script>
 <script src="js/index.js"></script>
 <script src="js/firebase_config.js"></script>
 <script type="module">
@@ -142,27 +144,6 @@ function sdkLoad(file){
     return import(u).catch(function(e){ console.warn('Firebase SDK unavailable at '+u, e && e.message || e); return next(); });
   }
   return next();
-}
-// Watchdog for the players listener: if Firestore never delivers a snapshot
-// (blocked websocket / firewall / suspended tab) read once over straight HTTP so
-// the page shows real data instead of sitting on "Connecting…" for ever.
-function watchPlayers(col, getDocs, onList){
-  var got=false;
-  var t=setTimeout(function(){ if(!got) probe(); }, 12000);
-  function probe(){
-    getDocs(col).then(function(snap){
-      got=true; clearTimeout(t);
-      var list=snap.docs.map(function(d){ return Object.assign({ _id: d.id }, d.data()); });
-      connState('ok','Connected (HTTP refresh)');
-      onList(list);
-      if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
-    }).catch(function(e){
-      console.warn('Players read failed:', e && (e.code||e.message));
-      connState('bad','Not connected — '+((e&&(e.code||e.message))||'network blocked'));
-      setTimeout(function(){ if(!got) probe(); }, 20000);
-    });
-  }
-  return { mark:function(){ got=true; clearTimeout(t); } };
 }
 function connState(kind, msg){ if(window.fbConnState) window.fbConnState(kind, msg); else { var el=document.getElementById('connState'); if(el){ el.textContent=msg; el.setAttribute('data-state', kind==='ok'?'connected':'offline'); } } }
 connState('wait','Connecting…');
@@ -193,7 +174,8 @@ if(!FBC.apiKey || !FBC.projectId){
   try { if(!window.CubSentryDB) window.CubSentryDB = { ready:false, players(){ try{ return JSON.parse(localStorage.getItem('cubs_last_players')||'[]')||[]; }catch(e){ return []; } }, onChange(){}, upsert(){ return Promise.reject(new Error('Database not connected')); }, remove(){ return Promise.reject(new Error('Database not connected')); }, pushStatusHist(){ return Promise.reject(new Error('Database not connected')); }, removeStatusHist(){ return Promise.reject(new Error('Database not connected')); }, eventUpsert(){ return Promise.reject(new Error('Database not connected')); }, eventRemove(){ return Promise.reject(new Error('Database not connected')); } }; } catch(e){}
 }
 else {
-  Promise.all([sdkLoad('firebase-app.js'), sdkLoad('firebase-firestore.js')]).then(function(mods){
+  Promise.all([sdkLoad('firebase-app.js'), sdkLoad('firebase-firestore.js')]).then(async function(mods){
+  await window.__localBoot;
     var appMod = mods[0], fsMod = mods[1];
     var initializeApp=appMod.initializeApp;
     var getFirestore=fsMod.getFirestore, collection=fsMod.collection, doc=fsMod.doc, getDoc=fsMod.getDoc,
@@ -210,135 +192,59 @@ else {
       const db = getFirestore(app);
       // Offline support: cache so the last players + events load with no connection.
       try { enableIndexedDbPersistence(db).catch(function(e){ console.warn('Offline persistence unavailable:', e && e.code || e); }); } catch(e) { console.warn('Offline persistence unavailable:', e); }
+      window.CubsSyncDiagnostics = window.CubsSyncDiagnostics || {startedAt:new Date().toISOString(),counts:{},recent:[]};
+      window.__syncCount=function(kind,detail){var d=window.CubsSyncDiagnostics;d.counts[kind]=(d.counts[kind]||0)+1;if(detail){d.recent.push({at:new Date().toISOString(),kind:kind,detail:String(detail)});if(d.recent.length>40)d.recent.shift();}};
       const col = collection(db, COLLECTION);
       let cache = [];
       const listeners = [];
       try { const _s=localStorage.getItem('cubs_last_players'); if(_s) cache=JSON.parse(_s)||[]; } catch(e){}
       function _saveSnap(){ try { localStorage.setItem('cubs_last_players', JSON.stringify(cache)); } catch(e){} }
-      var _watch = watchPlayers(col, fsMod.getDocs, function(list){
-        if(!cache.length && list.length){ cache = list; _saveSnap(); listeners.forEach(fn => { try { fn(); } catch(e){} }); if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} } }
-      });
       onSnapshot(col, snap => {
-        _watch.mark();
+        var _previous=cache;
         cache = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
+        var _identityFields=['player_id','player_name'];
+        var _oldById={};_previous.forEach(function(d){_oldById[d._id]=d;});
+        var _identityChanged=cache.length!==_previous.length||cache.some(function(d){var old=_oldById[d._id];return !old||_identityFields.some(function(k){return String(old[k]||'')!==String(d[k]||'');});});
+        window.__syncCount('playersSnapshots',snap.metadata.fromCache?'cache':'server');
         _saveSnap();
         connState('ok','Connected');
         if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
         listeners.forEach(fn => { try { fn(); } catch(e){} });
-        if(window.__applyDbToRoster){ try { window.__applyDbToRoster(); } catch(e){} }
+        if(window.__applyDbToRoster){ try { window.__applyDbToRoster({identityChanged:_identityChanged}); } catch(e){} }
       }, err => { console.warn("Firestore listen error:", err); connState('bad','Disconnected — showing saved data'); listeners.forEach(fn => { try { fn(); } catch(e){} }); });
       const evCol = collection(db, EVENTS_COLLECTION);
       // Serialize conflicting writes to the same event; retry against its latest
       // version instead of overwriting the other device's unchanged fields.
-      function writeActivityEvent(id,payload){
+      async function writeActivityEvent(id,payload){
+        await window.__localBoot;await window.LocalEdits.flush();
+        var jobs=await window.LocalEdits.pending();var job=jobs.find(function(j){return j.id===String(id);});
+        if(!job)return true;
+        var sentOps=JSON.parse(JSON.stringify(job.pending));
         var ref=doc(db,EVENTS_COLLECTION,String(id));
-        if(!window.ActivitySync || !payload.data || payload.data.indexOf('"_activity"')<0)
-          return setDoc(ref,payload,{merge:true});
-        return runTransaction(db,function(tx){
-          return tx.get(ref).then(function(snap){
-            var combined=window.ActivitySync.payloadMerge(snap.exists()?snap.data():null,payload);
-            tx.set(ref,combined,{merge:true});
-          });
+        var committed=await runTransaction(db,async function(tx){
+          var snap=await tx.get(ref);window.__syncCount('eventTransactionReads',id);
+          var stored=snap.exists()?snap.data():null;
+          var combined=window.ActivitySync.patchPayload(stored,{event_id:String(id),name:job.event.name,date:job.event.date,player_count:(job.event.players||[]).length,data:JSON.stringify(job.event),saved_at:new Date().toISOString()},sentOps);
+          if(!stored||!window.ActivitySync.payloadEqual(stored,combined)){tx.set(ref,combined,{merge:true});window.__syncCount('eventTransactionWrites',id);}
+          return combined;
         });
+        await window.LocalEdits.acknowledge(String(id),sentOps);
+        if(window.__pendingAck)window.__pendingAck(String(id),sentOps);
+        if(window.__applyDbEvents)window.__applyDbEvents([Object.assign({_id:String(id)},committed)],null,{partial:true});
+        await window.LocalEdits.flush();
+        return true;
       }
-      var _evLastSnap = Date.now();
-      // Fallback read for the Events collection over plain HTTPS. The live channel
-      // can go quiet on a network that stalls streaming connections (the page then
-      // looks frozen on old content); this keeps the event content refreshing.
-      // Reads ONLY what changed. Asking for the whole collection every few seconds
-      // is 35+ document reads a poll -- thousands a day for nothing. With a
-      // "saved_at >= last seen" query an idle poll returns nothing (0 reads).
-      var _evRestSince = '';
-      var _evRestFull = false;   // did the last HTTPS read return the WHOLE collection?
-      function _restEventList(){
-        if(!FBC.projectId || !FBC.apiKey || typeof fetch !== 'function') return Promise.resolve(null);
-        var base='https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(FBC.projectId)+
-          '/databases/(default)/documents';
-        var url, opt;
-        if(!_evRestSince){
-          // First call after a quiet connection: one full read, then change-only.
-          url=base+'/'+encodeURIComponent(EVENTS_COLLECTION)+'?pageSize=300&key='+encodeURIComponent(FBC.apiKey);
-          opt={ method:'GET' };
-        } else {
-          url=base+':runQuery?key='+encodeURIComponent(FBC.apiKey);
-          opt={ method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({
-            structuredQuery:{
-              from:[{ collectionId:EVENTS_COLLECTION }],
-              where:{ fieldFilter:{ field:{ fieldPath:'saved_at' }, op:'GREATER_THAN_OR_EQUAL',
-                                     value:{ stringValue:_evRestSince } } },
-              limit:200
-            }
-          })};
-        }
-        return fetch(url,opt).then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); }).then(function(j){
-          if(Array.isArray(j) && _evRestSince){        // runQuery answer (changed docs only)
-            var rows=[];
-            j.forEach(function(one){ if(one && one.document) rows.push(one.document); });
-            _evRestFull=false;
-            return rows.map(_mapRestEvent);
-          }
-          _evRestFull=!(j&&j.nextPageToken);          // paged answer is not the whole set
-          return ((j&&j.documents)||[]).map(_mapRestEvent);
-        });
-      }
-      function _mapRestEvent(d){
-        var f=d.fields||{};
-        function g(k){ var v=f[k]||{}; if(v.stringValue!==undefined) return v.stringValue;
-          if(v.integerValue!==undefined) return Number(v.integerValue); return ''; }
-        return { _id:String(d.name||'').split('/').pop(), event_id:g('event_id'), name:g('name'),
-                 date:g('date'), player_count:g('player_count'), data:g('data'), saved_at:g('saved_at') };
-      }
-      function _evRestNoteSince(list){
-        var max='';
-        (list||[]).forEach(function(d){ if(d && d.saved_at && String(d.saved_at)>max) max=String(d.saved_at); });
-        if(max) _evRestSince=max;
-      }
-      onSnapshot(evCol, snap => {
-        _evLastSnap = Date.now();
-        const evs = snap.docs.map(d => Object.assign({ _id: d.id }, d.data()));
-        try{ _evRestNoteSince(evs); }catch(e){}
-        try { localStorage.setItem('cubs_last_events', JSON.stringify(evs)); } catch(e){}
-        connState('ok','Connected');
-        if(window.__flushEvOutbox){ try { window.__flushEvOutbox(); } catch(e){} }
-        if(window.__applyDbEvents){ try { window.__applyDbEvents(evs, snap); } catch(e){} }
-      }, err => { console.warn("Firestore events listen error:", err); connState('bad','Disconnected — showing saved data'); });
-      // If the live channel has not delivered anything for a while, read once over
-      // HTTPS so another device's changes still show up here. This is a fallback,
-      // not a heartbeat: one read every 20s at most, backing off to 3 minutes when
-      // the read is refused (HTTP 429 means too many requests -- reading faster
-      // makes that worse, never better).
-      var _evPollGap = 20000, _evPollTimer = null;
-      function _evPollSchedule(ms){
-        if(_evPollTimer) clearTimeout(_evPollTimer);
-        _evPollTimer = setTimeout(_evPollOnce, ms);
-      }
-      function _evPollOnce(){
-        _evPollTimer = null;
-        try{ if(document.hidden){ _evPollSchedule(_evPollGap); return; } }catch(e){}
-        if(Date.now()-_evLastSnap < 15000){ _evPollSchedule(5000); return; }
-        var _wasDelta=!!_evRestSince;   // true = this read only returns changed docs
-        _restEventList().then(function(list){
-          if(!list){ _evPollSchedule(_evPollGap); return; }
-          _evLastSnap = Date.now();
-          _evPollGap = 20000;
-          if(list.length){
-            _evRestNoteSince(list);
-            connState('ok','Connected (HTTP refresh)');
-            // `partial` when this was the "changed since last time" query: the
-            // page must then NOT treat the list as the whole collection (that
-            // used to hide every other saved event until a reload).
-            if(window.__applyDbEvents){ try { window.__applyDbEvents(list, null, { partial: (_wasDelta || !_evRestFull) }); } catch(e){} }
-          }
-          _evPollSchedule(_evPollGap);
-        }).catch(function(err){
-          var m=String((err&&err.message)||'');
-          if(m.indexOf('429')>=0 || m.indexOf('quota')>=0 || m.indexOf('RESOURCE_EXHAUSTED')>=0){
-            _evPollGap = Math.min(Math.max(Math.round(_evPollGap*2), 40000), 180000);
-          }
-          _evPollSchedule(_evPollGap);
-        });
-      }
-      _evPollSchedule(_evPollGap);
+      var _evFirstServer=false;
+      onSnapshot(evCol,{includeMetadataChanges:true},function(snap){
+        var evs=snap.docs.map(function(d){return Object.assign({_id:d.id},d.data());});
+        var authoritative=!snap.metadata.fromCache&&!snap.metadata.hasPendingWrites;
+        var changedIds={};try{snap.docChanges().forEach(function(c){if(c.type!=='removed')changedIds[c.doc.id]=1;});}catch(e){changedIds=null;}
+        if(authoritative&&!_evFirstServer){changedIds=null;_evFirstServer=true;}
+        connState('ok',authoritative?'Connected':(navigator.onLine===false?'Offline — saved on this device':'Connecting — local data ready'));
+        window.__syncCount('eventSnapshots',authoritative?'server':'cache/local');
+        if(window.__applyDbEvents)window.__applyDbEvents(evs,snap,{partial:!authoritative,changedIds:changedIds});
+        if(authoritative&&window.__flushEvOutbox)window.__flushEvOutbox();
+      },function(err){connState('bad','Live sync unavailable — edits remain on this device');window.__syncCount('eventListenErrors',err.code||err.message);});
       window.CubSentryDB = {
         ready:true,
         players(){ return cache; },

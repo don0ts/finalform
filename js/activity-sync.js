@@ -6,7 +6,19 @@ var client=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
 var nameIndex=0,idIndex=1;
 var skip=new Set(['_dbSig','_syncId','_lastPosKey','__ei']);
 function clone(v){return v===undefined?null:JSON.parse(JSON.stringify(v));}
-function equal(a,b){return JSON.stringify(a)===JSON.stringify(b);}
+function canonical(v){
+ if(Array.isArray(v))return v.map(canonical);
+ if(v&&typeof v==='object'){var out={};Object.keys(v).sort().forEach(function(k){if(v[k]!==undefined)out[k]=canonical(v[k]);});return out;}
+ return v;
+}
+function equal(a,b){return JSON.stringify(canonical(a))===JSON.stringify(canonical(b));}
+function signature(ev){
+ var out={};Object.keys(ev||{}).forEach(function(k){if(['_dbId','_fromDb','_localStamp','_savedAt','saved_at'].indexOf(k)<0)out[k]=ev[k];});
+ return JSON.stringify(canonical(out));
+}
+function payloadEqual(a,b){
+ try{return String(a.name||'')===String(b.name||'')&&String(a.date||'')===String(b.date||'')&&Number(a.player_count||0)===Number(b.player_count||0)&&signature(JSON.parse(a.data))===signature(JSON.parse(b.data));}catch(e){return false;}
+}
 function key(path){return JSON.stringify(path);}
 function rowKey(r,i){return String(r.linkPid||r.cubsId||r.id||r.name||i)+'|'+String(r.hand||'');}
 function flat(ev){
@@ -178,10 +190,11 @@ function payloadMerge(stored,sent){
  payload.player_count=(merged.players||[]).length;
  return payload;
 }
-function receive(local,remote){
+function receive(local,remote,pending){
  // Capture unsent local work before incorporating a remote operation.
  capture(local);
  var old=flat(local),oldRemovals=JSON.stringify(local._removedPlayers||[]),ops=combine(local,remote);
+ Object.keys(pending||{}).forEach(function(k){ops[k]=clone(pending[k]);});
  // Unknown identities need an explicit add AND a real row in that event.
  if(scope(local)&&scope(remote)&&scope(local)!==scope(remote))return {changed:false,structural:false,needsWrite:false};
  preserveRemovals(local,remote,ops);
@@ -191,5 +204,21 @@ function receive(local,remote){
  var keys=new Set(Object.keys(old).concat(Object.keys(after)));keys.forEach(function(k){var item=after[k]||old[k];if(item.path[item.path.length-1]==='@'&&!equal(old[k]&&old[k].value,after[k]&&after[k].value))structural=true;});
  return {changed:!equal(old,after)||oldRemovals!==JSON.stringify(local._removedPlayers||[]),structural:structural,needsWrite:Object.keys(ops).some(function(k){return !equal(ops[k],(remote._activity||{})[k]);})};
 }
-root.ActivitySync={configure:function(name,id){nameIndex=name;idIndex=id;},prime:prime,capture:capture,merge:merge,receive:receive,flat:flat,combine:combine,payloadMerge:payloadMerge};
+function patchPayload(stored,sent,pending){
+ var local=JSON.parse(sent.data),remote=null;try{remote=JSON.parse((stored||{}).data||'null');}catch(e){}
+ local._dbId=sent.event_id;local._activityEvent=sent.event_id;
+ if(!remote){local._activity=pending||{};delete local._dbId;return Object.assign({},sent,{data:JSON.stringify(local)});}
+ remote._dbId=sent.event_id;
+ var edited=clone(local);edited._activity={};delete edited._removedPlayers;
+ var remoteFlat=flat(remote);
+ Object.keys(pending||{}).forEach(function(k){var op=clone(pending[k]),prior=(remote._activity||{})[k];
+  var cell=remoteFlat[k];if((op.deleted&&!cell)||(!op.deleted&&cell&&equal(cell.value,op.value)))return;
+  op.time=Math.max(Date.now(),Number(op.time)||0,Number(prior&&prior.time||0)+1);op.event=sent.event_id;edited._activity[k]=op;});
+ var merged=merge(remote,edited);delete merged._dbId;
+ return Object.assign({},sent,{name:merged.name||'',date:merged.date||'',player_count:(merged.players||[]).length,data:JSON.stringify(merged)});
+}
+function mergePending(a,b,pending){
+ var out=merge(a,b),ops=out._activity||{};Object.keys(pending||{}).forEach(function(k){ops[k]=clone(pending[k]);});prepareCandidates(out,b,ops);return apply(out,ops);
+}
+root.ActivitySync={isLocal:function(op){return op&&op.client===client;},mergePending:mergePending,patchPayload:patchPayload,configure:function(name,id){nameIndex=name;idIndex=id;},signature:signature,payloadEqual:payloadEqual,prime:prime,capture:capture,merge:merge,receive:receive,flat:flat,combine:combine,payloadMerge:payloadMerge};
 })(typeof window!=='undefined'?window:globalThis);

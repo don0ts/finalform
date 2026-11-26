@@ -250,6 +250,7 @@ function scheduleEventDbSync(force){
 // One paced live write of the event on screen. Called on a trailing edge, so a
 // burst of taps becomes one write carrying the final values.
 function _evLiveWrite(){
+  if(navigator.onLine===false)return;
   var cur=events[activeIdx];
   if(!cur||!cur._dbId) return;
   var db=_dbObj(); if(!db) return;
@@ -265,7 +266,7 @@ function _evLiveWrite(){
   // Never stack writes. If one is still unanswered, hold the edit and send it as
   // soon as that write settles -- two identical writes in flight is exactly how a
   // device ends up throttled.
-  if(_evInFlight){
+  if(_evInFlight||_evFlushing){
     _evPushDirty=true;
     if(!_eventDbTimer) _eventDbTimer=setTimeout(function(){ _eventDbTimer=null; _evLiveWrite(); }, _evWriteGap+40);
     return;
@@ -276,9 +277,10 @@ function _evLiveWrite(){
     // What is being sent, captured NOW. The event object keeps changing while the
     // write is in flight, so comparing against it later would mark edits as
     // "already saved" and quietly drop them.
-    var sentSig=_eventSig(cur);
+    var sentSig=_eventSig(cur),sentActivity=_evContentToken(cur);
     var sentJson=JSON.stringify(cur,function(k,v){ if(k==='_dbId'||k==='_fromDb'||k==='_localStamp'||k==='_savedAt') return undefined; return v; });
     _evInFlight=true;
+    if(window.__syncCount)window.__syncCount('eventLiveSaveStarted',id);
     // Remember the exact moment we push, so an older echo is ignored while this
     // write is in flight (and just after it lands).
     _lastLivePushAt=Date.now(); _evPushPending=true; _evPushStart=Date.now();
@@ -293,6 +295,7 @@ function _evLiveWrite(){
       _evInFlight=false;
       _lastLivePushAt=Date.now(); _lastLivePush=stamp; _evPushPending=false;
       _eventPushedSig=sentSig;
+      _evConfirmedActivity[id]=sentActivity;
       try{ _evPushedSigs[id]=sentSig; }catch(e){}
       _setPushedStamp(id, stamp);
       // Remember exactly what we wrote so an identical echo is a no-op.
@@ -357,9 +360,30 @@ function _evMarkLocal(ev){
 if(typeof window!=='undefined'){
   window.__evSnapStamp=function(){ return _lastLivePush; };
 }
+var _localSeen=new WeakMap(),_durablePending={},_localTasks=Promise.resolve();
+function _localIndicator(text,bad){var n=document.getElementById('localSaveState');if(n){n.textContent=text;n.style.color=bad?'#ff7777':'';}}
+function _writeLocalEvents(){
+ if(!window.LocalEdits||!window.__localReady)return;
+ events.forEach(function(ev){
+  var before=_localSeen.get(ev),ops=window.LocalEdits.delta(before&&before.ops,ev._activity||{});
+  Object.keys(ops).forEach(function(k){if(!window.ActivitySync.isLocal(ops[k]))delete ops[k];});
+  var signature=window.ActivitySync.signature(ev);
+  if(before&&before.signature===signature)return;
+  _localSeen.set(ev,{signature:signature,ops:JSON.parse(JSON.stringify(ev._activity||{}))});
+  var key=window.LocalEdits.id(ev);if(Object.keys(ops).length)_durablePending[key]=Object.assign(_durablePending[key]||{},ops);
+  _localIndicator('Saving on this device…');
+  var save=window.LocalEdits.save(ev,ops).then(function(){_localIndicator(Object.keys(_durablePending).length?'Saved on this device — waiting to sync':'Saved on this device');},function(err){_localSeen.delete(ev);_localIndicator('LOCAL SAVE FAILED — keep this tab open and export your work',true);showToast('Local save failed: '+(err.message||err));throw err;});
+  _localTasks=save;save.catch(function(){});
+ });
+}
+window.__pendingAck=function(id,sent){var pending=_durablePending[id]||{};Object.keys(sent).forEach(function(k){if(JSON.stringify(pending[k])===JSON.stringify(sent[k]))delete pending[k];});if(!Object.keys(pending).length)delete _durablePending[id];_localIndicator(Object.keys(_durablePending).length?'Saved on this device — waiting to sync':'Saved on this device — synced');};
 function persistEvents(force){
-  if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; if(window.ActivitySync) window.ActivitySync.capture(events[activeIdx]); _evMarkLocal(events[activeIdx]); }
-  try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
+  if(hasActiveEvent()){ events[activeIdx].players=players; events[activeIdx].date=eventDate; if(window.ActivitySync){
+    var ev=events[activeIdx];
+    if(!_localSeen.has(ev)&&!Object.keys(ev._activity||{}).length){var seed={_dbId:window.LocalEdits.id(ev),name:'',date:'',players:[],data:{}};window.ActivitySync.prime(seed);seed.name=ev.name;seed.date=ev.date;seed.players=ev.players;seed.data=ev.data;window.ActivitySync.capture(seed);ev._activity=seed._activity;ev._activityEvent=seed._dbId;ev._dbId=seed._dbId;}
+    else window.ActivitySync.capture(ev);
+  } _evMarkLocal(events[activeIdx]); }
+  _writeLocalEvents();
   if(hasActiveEvent() && players[current]) scheduleDBSync(players[current]);
   // An event that was created while the database could not be reached lives on
   // this device only. Remember it so it is uploaded by itself the moment a
@@ -375,21 +399,15 @@ function persistEvents(force){
   scheduleEventDbSync(!!force);
   if(_popupSearchClear){ try{ _popupSearchClear(); }catch(e){} }
 }
-// ---- Immediate event writes -------------------------------------------------
-// There is no local queue to look at any more. Creating or editing an event sends
-// it to the database straight away; the database is the only copy the UI reports
-// on. A write that cannot be confirmed is retried quietly in the background (the
-// event also stays in this browser's local storage, so nothing is lost either
-// way), and the one thing the user is ever told is a single short line saying it
-// has not landed yet.
+// ---- Durable pending event writes (SDK only) -------------------------------
 var _evWrites={};                 // document id -> {ev, tries, err}  (memory only)
 var _evFlushGap=2000;             // grows while the database keeps failing to answer
 var _evFlushTimer=null, _evFlushing=false, _evFlushStart=0;
 var _evLastErr='', _evUploading=false;
 // One shared write deadline. A Firestore write does NOT fail while a device has a
-// half-open connection: it simply never answers. This deadline, plus the plain
-// HTTPS fallback further down, is what keeps a create from hanging for ever.
-var EV_WRITE_TIMEOUT=20000, EV_PROBE_TIMEOUT=9000, EV_REST_AFTER=6000;
+// half-open connection: it may not answer. A deadline schedules an SDK retry;
+// durable edits remain on this device until confirmation.
+var EV_WRITE_TIMEOUT=20000, EV_PROBE_TIMEOUT=9000;
 function _evRace(p, ms, what){
   return new Promise(function(resolve,reject){
     var done=false;
@@ -446,62 +464,6 @@ function _dbProbe(ms){
     function(err){ return { ok:false, code:'probe: '+((err&&(err.code||err.message))||'failed') }; }
   );
 }
-// ---- Plain-HTTPS (REST) write ----------------------------------------------
-// The real-time SDK talks to Firestore over a streaming channel. On a network
-// that blocks or stalls that channel a write never gets acknowledged, which is
-// exactly what "write: timeout" was. The same document is therefore also sent
-// over a normal HTTPS request a few seconds later, so the event lands in the
-// database whether or not the stream answers. Same document id, same content.
-function _evRestUrl(id){
-  var c=(typeof window!=='undefined'&&window.FIREBASE_CONFIG)||{};
-  if(!c.projectId||!c.apiKey||!id) return '';
-  var coll=(typeof window!=='undefined'&&window.CUBS_EVENTS_COLLECTION)||'Events';
-  return 'https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(c.projectId)+
-    '/databases/(default)/documents/'+encodeURIComponent(coll)+'/'+encodeURIComponent(id)+
-    '?key='+encodeURIComponent(c.apiKey)+
-    '&updateMask.fieldPaths=event_id&updateMask.fieldPaths=name&updateMask.fieldPaths=date'+
-    '&updateMask.fieldPaths=player_count&updateMask.fieldPaths=data&updateMask.fieldPaths=saved_at';
-}
-function _evRestWrite(id, payload, attempt){
-  var url=_evRestUrl(id);
-  if(!url) return Promise.reject(new Error('no config'));
-  if(typeof fetch!=='function') return Promise.reject(new Error('no fetch'));
-  if(window.ActivitySync && payload.data && payload.data.indexOf('"_activity"')>=0 && !payload._restChecked){
-    var getUrl=url.split('&updateMask')[0];
-    return fetch(getUrl).then(function(r){
-      if(r.status===404)return null;
-      if(!r.ok)throw new Error('http-'+r.status);
-      return r.json();
-    }).then(function(docu){
-      var old=null;
-      if(docu){old={data:((docu.fields||{}).data||{}).stringValue||''};}
-      var next=window.ActivitySync.payloadMerge(old,payload);
-      next._restChecked=true; next._restUpdateTime=docu&&docu.updateTime;next._restExists=!!docu;
-      return _evRestWrite(id,next,attempt||0);
-    });
-  }
-  if(payload._restChecked){
-    if(payload._restUpdateTime)url+='&currentDocument.updateTime='+encodeURIComponent(payload._restUpdateTime);
-    else if(!payload._restExists)url+='&currentDocument.exists=false';
-  }
-  var body={ fields:{
-    event_id:{ stringValue:String(payload.event_id||id) },
-    name:{ stringValue:String(payload.name||'') },
-    date:{ stringValue:String(payload.date||'') },
-    player_count:{ integerValue:String(payload.player_count||0) },
-    data:{ stringValue:String(payload.data||'') },
-    saved_at:{ stringValue:String(payload.saved_at||new Date().toISOString()) }
-  }};
-  return fetch(url,{ method:'PATCH', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify(body) })
-    .then(function(r){
-      if(r.ok) return true;
-      if(payload._restChecked && (r.status===409||r.status===400||r.status===412) && (attempt||0)<4){
-        var retry=Object.assign({},payload); delete retry._restChecked;delete retry._restUpdateTime;delete retry._restExists;
-        return _evRestWrite(id,retry,(attempt||0)+1);
-      }
-      var e=new Error('http-'+r.status); e.code='http-'+r.status; throw e;
-    });
-}
 // Remember an event that still owes the database a write.
 function _queueEventUpload(ev){
   if(!ev) return;
@@ -517,11 +479,15 @@ function _queueEventUpload(ev){
   _scheduleEvFlush(500);
 }
 // Send one event now (0 = immediately, no waiting timer).
+var _evConfirmedActivity={};
+function _evContentToken(ev){return window.ActivitySync?window.ActivitySync.signature(ev):_eventSig(ev);}
 function _evPushSoon(ev, ms){
   if(!ev) return;
   var id=_evResolveDocId(ev);
   if(!id) return;
+  if(_evConfirmedActivity[id]===_evContentToken(ev))return;
   _evOwedAdd(id, ev);
+  if(window.__syncCount)window.__syncCount('eventRepairQueued',id);
   if(ms===0){ try{ flushEventOutbox(); }catch(e){} return; }
   _scheduleEvFlush(ms===undefined?500:ms);
 }
@@ -560,6 +526,7 @@ function _evPermanent(code){
 // id is never re-derived from the current name/date (doing that turned a rename
 // into a second document, and losing the old one if the write failed).
 function _pushEventDoc(ev, id){
+  if(navigator.onLine===false)return Promise.reject(new Error('offline'));
   var db=_dbObj(); if(!db) return Promise.reject(new Error('not connected'));
   var stamp=new Date().toISOString();
   var target=ev._dbId||id;
@@ -571,33 +538,17 @@ function _pushEventDoc(ev, id){
     var big=new Error('too-large'); big.code='write: too-large';
     return Promise.reject(big);
   }
-  var sentSig=_eventSig(ev);
+  var sentSig=_eventSig(ev),sentActivity=_evContentToken(ev);
   var payload={ event_id:target, name:String(ev.name||''), date:String(ev.date||''),
     player_count:(ev.players?ev.players.length:0), data:json, saved_at:stamp };
+  _writeLocalEvents();
   _evUploading=true;
-  // The live SDK write, and (ONLY if it has not confirmed after EV_REST_AFTER ms)
-  // the identical write over plain HTTPS. Whichever confirms first wins -- and the
-  // loser is cancelled, because a second write of the same document is not free:
-  // Firestore rate-limits sustained writes to one document and answers HTTP 429.
-  var sdkOk=false, sdkRefused=false;
-  var sdkP=_evRace(db.eventUpsert(target,payload), EV_WRITE_TIMEOUT, 'write').then(function(v){
-    sdkOk=true; return v;
-  }, function(e){
-    var c=String((e&&(e.code||e.message))||'');
-    if(c.indexOf('permission-denied')>=0 || c.indexOf('invalid-argument')>=0 || c.indexOf('too-large')>=0) sdkRefused=true;
-    throw e;
-  });
-  var restP=new Promise(function(resolve,reject){
-    setTimeout(function(){
-      if(sdkOk) return resolve('sdk');          // already stored -- never write twice
-      if(sdkRefused) return resolve('skip');    // refused for good -- same rules apply
-      _evRestWrite(target,payload).then(function(){ _evRestDone=true; resolve('rest'); }, reject);
-    }, EV_REST_AFTER);
-  });
+  if(window.__syncCount)window.__syncCount('eventQueuedSaveStarted',target);
+  // Local work is stored before the live SDK write. No HTTP backup is used.
+  var sdkP=_evRace(db.eventUpsert(target,payload),EV_WRITE_TIMEOUT,'write');
   sdkP.catch(function(){});
-  restP.catch(function(){});
   // Write first, always. Nothing is deleted until the new content is safely stored.
-  return Promise.race([sdkP, restP]).then(function(){
+  return sdkP.then(function(){
     _evUploading=false;
     ev._dbId=target;
     _setPushedStamp(target,stamp);
@@ -605,7 +556,9 @@ function _pushEventDoc(ev, id){
     if(!ev._savedAt||String(ev._savedAt)<stamp) ev._savedAt=stamp;
     _evLastErr=''; _evFlushGap=2000;
     _evPushedSigs[target]=sentSig;
+    _evConfirmedActivity[target]=sentActivity;
     _evOwedClear(target); if(oldId) _evOwedClear(oldId);
+    if(_evContentToken(ev)!==sentActivity)_evOwedAdd(target,ev);
     // Only after a successful write: retire a superseded document (legacy path).
     if(oldId && oldId!==target){
       try{ Promise.resolve(db.eventRemove(oldId)).catch(function(){}); }catch(e){}
@@ -613,11 +566,11 @@ function _pushEventDoc(ev, id){
     return target;
   }, function(err){ _evUploading=false; throw _evTagErr(err, 'write'); });
 }
-var _evRestDone=false;
 // Send every event that still owes a write, one at a time. Nothing is displayed:
 // a success is simply silent, and a failure leaves the event pending with a
 // growing gap between attempts.
 function flushEventOutbox(){
+  if(_evInFlight){_scheduleEvFlush(1300);return;}
   if(_evFlushing){
     // The previous round never came back: take it over instead of staying wedged.
     if(Date.now()-_evFlushStart<45000) return;
@@ -637,10 +590,9 @@ function flushEventOutbox(){
     if(!ev){ _evOwedClear(id); return next(); }
     if(!String(ev.date||'').trim() && !String(ev.name||'').trim()){ _evOwedClear(id); return next(); }
     _pushEventDoc(ev, _evResolveDocId(ev)||ev._dbId||id).then(function(){
-      _evOwedClear(id);
-      try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
+      _writeLocalEvents();
       try{ renderSavedEvents(hasActiveEvent()?activeIdx:undefined); }catch(e){}
-      try{ _statusSyncSoon(); }catch(e){}
+      try{(ev.players||[]).forEach(scheduleDBSync);_statusSyncSoon();}catch(e){}
       next();
     }, function(err){
       var why=(err&&(err.code||err.message))||'error';
@@ -676,7 +628,7 @@ function _evSweepLocal(){
     e._dbId=id; _evOwedAdd(id,e); n++;
   });
   if(n){
-    try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
+    _writeLocalEvents();
     _scheduleEvFlush(1200);
   }
   return n;
@@ -704,7 +656,7 @@ function saveEventToDB(){
 // Retry triggers: connection returns, tab becomes visible again. A write that is
 // still owed is never announced as a list or a count.
 try{
-  window.addEventListener('online',function(){ if(_evOwedCount()) _scheduleEvFlush(400); });
+  window.addEventListener('online',function(){ if(_evOwedCount()) _scheduleEvFlush(400);if(Object.keys(_dbDirty).length)_dbFlush(); });
   document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='visible'&&_evOwedCount()) _scheduleEvFlush(600); });
 }catch(e){}
 if(typeof window!=='undefined'){
@@ -852,6 +804,7 @@ function applyDbEvents(list, snap, opts){
   }
   list.forEach(function(docu){
     var id=docu&&(docu._id||docu.event_id); if(!id) return;
+    if(opts&&opts.changedIds&&!opts.changedIds[id])return;
     // Find an existing local event tracking this DB doc id.
     var idx=-1;
     for(var i=0;i<events.length;i++){ if(events[i]._dbId===id){ idx=i; break; } }
@@ -886,9 +839,12 @@ function applyDbEvents(list, snap, opts){
     var isActive=(activeIdx===idx);
     // Keep remote updates queued, not lost, while the active name is a draft.
     if(isActive && _playerNameEditors.size){ _nameDeferredEvents[String(id)]=docu; return; }
+    var incStamp=Date.parse((parsed&&parsed.saved_at)||docu.saved_at||'')||0;
     if(window.ActivitySync && Object.keys(incoming._activity||{}).length){
       var selectedPlayer=players[current];
-      var delta=window.ActivitySync.receive(ev,incoming);
+      var _localPending=_durablePending[id];
+      if(_localPending){incoming=JSON.parse(JSON.stringify(incoming));Object.keys(_localPending).forEach(function(k){delete incoming._activity[k];});}
+      var delta=window.ActivitySync.receive(ev,incoming,_localPending);
       if(delta.needsWrite) _evPushSoon(ev,900);
       if(delta.changed){
         changed=true;refreshed++;
@@ -908,13 +864,13 @@ function applyDbEvents(list, snap, opts){
       if(incStamp) ev._savedAt=new Date(incStamp).toISOString();
       return;
     }
+    if(_durablePending[id])return;
     var _rosterRemovals=_combineRosterRemovals([ev,incoming]);
     var _rosterMetaChanged=JSON.stringify(ev._removedPlayers||[])!==JSON.stringify(_rosterRemovals);
     if(_rosterRemovals.length) incoming=_filterRemovedRoster(incoming,_rosterRemovals);
     // Don't let a copy that is OLDER (or the same age) than our local edits win.
     // This replaces the old blanket timer: an edit made here is stamped locally,
     // so an echo of an earlier save can never roll it back (Blast 2 -> 10 stays 10).
-    var incStamp=Date.parse((parsed&&parsed.saved_at)||docu.saved_at||'')||0;
     var myStamp=_evLocalStamp(ev);
     var pushed=_getPushedStamp(id); var pushedMs=Date.parse(pushed||'')||0;
     // A stale echo of an earlier save: keep the local value and make sure the
@@ -991,9 +947,11 @@ function applyDbEvents(list, snap, opts){
   // under an open editor / focused field.
   for(var pdi=(_complete?events.length-1:-1);pdi>=0;pdi--){
     var pev=events[pdi];
-    if(!pev._dbId || incomingIds[pev._dbId]) continue;
+    if(!pev._dbId || incomingIds[pev._dbId]||_durablePending[pev._dbId]) continue;
     var pActive=(activeIdx===pdi);
     if(pActive && (popupOpen || isFormFieldFocused() || _playerNameEditors.size)) continue;
+    if(window.LocalEdits)window.LocalEdits.remove(pev._dbId).catch(function(){_localIndicator("Failed to save event removal on this device",true);});
+    _evOwedClear(pev._dbId);
     events.splice(pdi,1);
     changed=true;
     if(pActive){
@@ -1007,7 +965,7 @@ function applyDbEvents(list, snap, opts){
     }
   }
   if(changed){
-    try{ localStorage.setItem(EVENTS_KEY,JSON.stringify(events)); }catch(e){}
+    _writeLocalEvents();
     renderSavedEvents(hasActiveEvent()?activeIdx:undefined);
     updateGate();
     // The roster object may have been swapped by the merge; point the UI at the
@@ -1036,7 +994,7 @@ function applyDbEvents(list, snap, opts){
       if(_real){ _evSwept=true; _evSweepLocal(); }
     }catch(e){}
   }
-  if(typeof _cdb==='function'&&_cdb()&&typeof syncRosterIdsFromDb==='function')syncRosterIdsFromDb();
+  if(typeof _cdb==='function'&&_cdb()&&typeof syncRosterIdsFromDb==='function')syncRosterIdsFromDb(opts&&opts.changedIds);
 }
 if(typeof window!=='undefined') window.__applyDbEvents=applyDbEvents;
 function updateGate(){
@@ -2118,6 +2076,8 @@ function confirmDeleteEvent(i){
     '<div style="display:flex;gap:10px;justify-content:flex-end"><button class="ghost" id="mDelEvtCancel">Cancel</button><button class="primary" id="mDelEvtOk" style="background:#b91c1c;border-color:#b91c1c">Delete</button></div>');
   document.getElementById('mDelEvtCancel').addEventListener('click',closeModal);
   document.getElementById('mDelEvtOk').addEventListener('click',()=>{
+    var removedId=events[i]&&window.LocalEdits.id(events[i]);
+    if(removedId){delete _durablePending[removedId];_evOwedClear(removedId);window.LocalEdits.remove(removedId).catch(function(){_localIndicator('Failed to save event removal on this device',true);});}
     events.splice(i,1);
     if(activeIdx===i){
       activeIdx=-1; players=[]; eventDate='';
@@ -3055,6 +3015,7 @@ function scheduleDBSync(p){
   _dbFlushTimer=setTimeout(_dbFlush, 700);
 }
 function _dbFlush(){
+  if(navigator.onLine===false){_dbFlushTimer=null;return;}
   _dbFlushTimer=null;
   var db=_cdb(); if(!db||!db.upsert) return;
   var items=[];
@@ -3064,7 +3025,10 @@ function _dbFlush(){
     job.id=String(dbDocId(p));
     var data;
     try{ data=_pruneBlankDoc(playerToDoc(p)); }catch(e){ return; }
-    var sig=_dbPayloadSig(job.id,data);
+    var fullData=data;
+    var cached=(db.players&&db.players()||[]).find(function(d){return String(d._id)===String(job.id);});
+    if(cached){var patch={};Object.keys(data).forEach(function(k){if(String(data[k]||'')!==String(cached[k]||''))patch[k]=data[k];});data=patch;if(!Object.keys(data).length)return;}
+    var sig=_dbPayloadSig(job.id,fullData);
     if(p._dbSig===sig){ return; }              // identical to the stored doc: skip
     items.push({ p:p, id:job.id, data:data, sig:sig, prev:(p._syncId&&String(p._syncId)!==String(job.id))?String(p._syncId):'' });
   });
@@ -3153,7 +3117,7 @@ function queueRosterIdRefresh(){
   if(!_hasDeferredRosterIds)return;
   setTimeout(function(){syncRosterIdsFromDb();},0);
 }
-function syncRosterIdsFromDb(){
+function syncRosterIdsFromDb(eventIds){
   var db=_cdb();if(!db)return;
   var docs=db.players()||[],byId={},byName={},touched=[];
   _hasDeferredRosterIds=false;
@@ -3161,6 +3125,8 @@ function syncRosterIdsFromDb(){
   var ov=document.getElementById('overlay'),ov2=document.getElementById('overlay2');
   var modal=(ov&&ov.classList.contains('show'))||(ov2&&ov2.classList.contains('show'));
   events.forEach(function(ev,ei){
+    if(_durablePending[ev._dbId])return;
+    if(eventIds&&!eventIds[ev._dbId])return;
     var changed=false,isActive=ei===activeIdx;
     (ev.players||[]).forEach(function(p){
       if(_playerNameEditors.has(p)|| (isActive&&(modal||(players[current]===p&&isFormFieldFocused())))){
@@ -3192,19 +3158,21 @@ function syncRosterIdsFromDb(){
     if(changed){
       if(window.ActivitySync)window.ActivitySync.capture(ev);
       _evMarkLocal(ev);_queueEventUpload(ev);touched.push(ei);
+      if(window.__syncCount)window.__syncCount('eventIdReconciliationQueued',ev._dbId||eventDocId(ev));
     }
   });
   if(!touched.length)return;
-  try{localStorage.setItem(EVENTS_KEY,JSON.stringify(events));}catch(e){}
+  _writeLocalEvents();
   try{_scheduleEvFlush(1200);}catch(e){}
   if(touched.indexOf(activeIdx)>=0){
     patchActivityPills();syncFormValues();
     if(mode==='data'&&!modal&&!isFormFieldFocused())renderDataEntry();
   }
 }
-function applyDbToRoster(){
+function applyDbToRoster(opts){
+  if(hasActiveEvent()&&_durablePending[events[activeIdx]._dbId])return;
   if(!_cdb()) return;
-  syncRosterIdsFromDb();
+  if(!opts||opts.identityChanged!==false)syncRosterIdsFromDb();
   if(!hasActiveEvent() || !Array.isArray(players) || !players.length) return;
   // Don't fight the user while a popup editor (Edit Players / Tech) is open.
   var ov=document.getElementById('overlay'), ov2=document.getElementById('overlay2');
@@ -3496,6 +3464,7 @@ function _statusSyncSoon(ms){
   _statusSyncTimer=setTimeout(function(){ _statusSyncTimer=null; try{ saveToStatus(true); }catch(e){} }, ms||8000);
 }
 function saveToStatus(silent){
+  if(navigator.onLine===false)return;
   if(!hasActiveEvent()){ if(!silent) showToast('Create or load an event first'); return; }
   var dt=(eventDate||'').trim();
   if(!dt){ if(!silent) showToast('Set the event date first'); return; }
@@ -4653,7 +4622,23 @@ function setMode(m){
 document.getElementById('modeMeas').addEventListener('click',()=>setMode('measurables'));
 document.getElementById('modeData').addEventListener('click',()=>setMode('data'));
 
+window.__localReady=false;
+window.__localBoot=window.LocalEdits.ready.then(async function(records){
 loadEvents();
+var legacy=events.slice();
+try{if(localStorage.getItem('meas_local_migrated_v1')==='yes')legacy=[];}catch(e){}
+var savedKeys={};
+(records||[]).forEach(function(record){var ev=record.event;if(!ev||!Array.isArray(ev.players))return;ev._dbId=record.id;savedKeys[record.id]=1;if(Object.keys(record.pending||{}).length)_durablePending[record.id]=record.pending;});
+events=(records||[]).map(function(r){return r.event;}).filter(Boolean);
+legacy.forEach(function(ev){var key=window.LocalEdits.id(ev);if(!savedKeys[key])events.push(ev);});
+events.forEach(function(ev){if(!Array.isArray(ev.players))ev.players=[];ev.players.forEach(function(p){_normPlayerIdx(p);});window.ActivitySync.prime(ev);_localSeen.set(ev,{signature:window.ActivitySync.signature(ev),ops:JSON.parse(JSON.stringify(ev._activity||{}))});});
+window.__localReady=true;
+Object.keys(_durablePending).forEach(function(id){var ev=events.find(function(e){return window.LocalEdits.id(e)===id;});if(ev)_evOwedAdd(id,ev);});
+// Persist migrated snapshots once; their existing values are not treated as new edits.
+await Promise.all(legacy.filter(function(ev){return !savedKeys[window.LocalEdits.id(ev)];}).map(function(ev){return window.LocalEdits.save(ev,{});}));
+try{localStorage.setItem('meas_local_migrated_v1','yes');localStorage.removeItem('cubs_last_events');}catch(e){}
+var wrap=document.querySelector('.wrap');if(wrap)wrap.inert=false;
+_localIndicator(Object.keys(_durablePending).length?'Saved work restored — waiting to sync':'Saved work restored on this device');
 renderSavedEvents();
 // auto-capitalize the first letter of any text input as the user types
 if(typeof document!=='undefined' && document.addEventListener){
@@ -4699,3 +4684,6 @@ if(typeof document!=='undefined' && document.addEventListener){
 }
 if(events.length){ var _restoreIdx=findEventByStableKey((function(){ try{ return localStorage.getItem(ACTIVE_EVT_KEY); }catch(e){ return null; } })()); setActiveEvent(_restoreIdx>=0?_restoreIdx:0); }
 else { updateGate(); renderPlayers(); renderForm(); }
+
+}).catch(function(err){_localIndicator('Cannot open local storage — input disabled to protect your work',true);throw err;});
+window.__localBoot.catch(function(){});
